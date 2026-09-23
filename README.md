@@ -44,18 +44,26 @@ NanoVector
 
 ### Prerequisites
 - JDK 21 or higher (compiled with `--release 21`).
-- Maven 3.9+ (or use the provided `.\mvn.cmd`).
+- Git.
 
 ### Build & Run Tests
+Using standard Maven Wrapper:
+
+On Windows:
 ```powershell
-.\mvn.cmd clean test
+.\mvnw.cmd clean test
+```
+
+On Linux / macOS:
+```bash
+./mvnw clean test
 ```
 
 ---
 
 ## 🗺️ Roadmap & Evolutionary Milestones
 
-- [x] **v0.1**: Multi-module setup, contiguous `VectorStorage`, distance metrics, primitive `BoundedMaxHeap`, `FlatIndex` Ground Truth Oracle (26/26 unit tests).
+- [x] **v0.1**: Multi-module setup, contiguous `VectorStorage`, distance metrics, primitive `BoundedMaxHeap`, `FlatIndex` Ground Truth Oracle (26 unit tests: Distance 6, Storage 5, Heap 3, FlatIndex 7, VectorUtils 5).
 - [ ] **v0.2**: HNSW Core Graph (multi-layer routing, neighbor selection heuristic Algorithm 4).
 - [ ] **v0.3**: Epoch-based visited set optimization.
 - [ ] **v0.4**: Binary persistence (`.nvec` file format).
