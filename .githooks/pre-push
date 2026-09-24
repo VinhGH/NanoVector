@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ -f "./mvnw.cmd" ] && [ "${OS:-}" = "Windows_NT" ]; then
+    MVN="./mvnw.cmd"
+elif [ -f "./mvnw" ]; then
+    MVN="./mvnw"
+else
+    MVN="mvn"
+fi
+
+echo "[pre-push] Running test suite..."
+$MVN test
+
+echo "[pre-push] Passed."
