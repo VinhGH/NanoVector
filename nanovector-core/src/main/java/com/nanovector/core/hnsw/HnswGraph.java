@@ -59,6 +59,8 @@ public final class HnswGraph {
 
     /**
      * Adds a new node to the graph.
+     * If this is the first node added, it becomes the initial entry point.
+     * Subsequent entry point updates are managed via {@link #setEntryPoint(int, int)}.
      *
      * @param node the node to add (its internalId must equal the current node count)
      */
@@ -70,10 +72,25 @@ public final class HnswGraph {
         }
         nodes.add(node);
 
-        if (entryPointId == -1 || node.maxLevel() > maxLevel) {
+        if (entryPointId == -1) {
             entryPointId = node.internalId();
             maxLevel = node.maxLevel();
         }
+    }
+
+    /**
+     * Updates the entry point and maximum level of the graph.
+     *
+     * @param entryPointId internal ID of the new entry point
+     * @param maxLevel     the maximum level of the new entry point
+     */
+    public void setEntryPoint(int entryPointId, int maxLevel) {
+        if (entryPointId < 0 || entryPointId >= nodes.size()) {
+            throw new IndexOutOfBoundsException(
+                    "Entry point ID " + entryPointId + " out of bounds, graph has " + nodes.size() + " nodes");
+        }
+        this.entryPointId = entryPointId;
+        this.maxLevel = maxLevel;
     }
 
     /**

@@ -26,7 +26,7 @@ class HnswGraphTest {
     void testNodeCreation() {
         HnswNode node = new HnswNode(0, 3);
 
-        assertThat(node.internalId()).isEqualTo(0);
+        assertThat(node.internalId()).isZero();
         assertThat(node.maxLevel()).isEqualTo(3);
         for (int l = 0; l <= 3; l++) {
             assertThat(node.getNeighbors(l)).isEmpty();
@@ -71,21 +71,22 @@ class HnswGraphTest {
 
         assertThat(graph.isEmpty()).isFalse();
         assertThat(graph.size()).isEqualTo(1);
-        assertThat(graph.entryPointId()).isEqualTo(0);
+        assertThat(graph.entryPointId()).isZero();
         assertThat(graph.maxLevel()).isEqualTo(2);
     }
 
     @Test
-    @DisplayName("HnswGraph: Entry point updates only when a higher-level node is added")
-    void testEntryPointUpdatesOnHigherLevel() {
+    @DisplayName("HnswGraph: Entry point can be updated via setEntryPoint")
+    void testEntryPointUpdate() {
         HnswGraph graph = new HnswGraph(CONFIG);
         graph.addNode(new HnswNode(0, 2));
-        graph.addNode(new HnswNode(1, 1)); // lower level -> no update
+        graph.addNode(new HnswNode(1, 1)); // lower level -> no change
 
-        assertThat(graph.entryPointId()).isEqualTo(0);
+        assertThat(graph.entryPointId()).isZero();
         assertThat(graph.maxLevel()).isEqualTo(2);
 
-        graph.addNode(new HnswNode(2, 5)); // higher level -> update
+        graph.addNode(new HnswNode(2, 5));
+        graph.setEntryPoint(2, 5); // explicit update
 
         assertThat(graph.entryPointId()).isEqualTo(2);
         assertThat(graph.maxLevel()).isEqualTo(5);
