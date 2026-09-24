@@ -32,11 +32,70 @@ NanoVector
    - **Dot Product**: $-(u \cdot v)$ (negated to conform to minimization).
 3. **Allocation-Free Scan Loop**:
    - Distance computations run directly against the internal contiguous buffer.
-   - Zero heap allocations during the $N$-vector distance scan.
+   - Zero heap allocations during the distance scan.
 4. **Deterministic Tie-Breaking**:
    - When distances are identical, ranking defaults to `externalId` ascending, ensuring 100% reproducible search results.
 5. **Exact Ground Truth Baseline**:
    - `FlatIndex` ($O(N)$ sequential scan) acts as the exact reference oracle for measuring recall in approximate nearest neighbor (ANN) graphs.
+
+---
+
+## 🧠 HNSW (Hierarchical Navigable Small World) Engine
+
+`HnswIndex` implements the `VectorIndex` contract to provide **empirically sublinear search performance, with approximately logarithmic behavior under suitable conditions** (*Malkov & Yashunin, 2018*).
+
+### Separation of Concerns Architecture
+
+```text
+HnswIndex (VectorIndex contract: insert, searchKnn)
+    │
+    ├── VectorStorage    (Contiguous float[] buffer, externalId ↔ internalId mapping)
+    │
+    └── HnswGraph        (Graph topology, entryPoint, connect, prune, multi-layer routing)
+            │
+            ├── HnswNode         (internalId, maxLevel, int[][] neighbors) [Zero VectorStorage coupling]
+            ├── LevelGenerator   (Exponential decay level assignment with deterministic seed)
+            ├── NeighborSelector (Algorithm 4 heuristic + deterministic fallback)
+            └── EpochVisitedSet  (Epoch-based O(1) visited tracking)
+```
+
+### Key Technical Implementations
+
+1. **Neighbor Selection**:
+   - Implements the HNSW neighbor-selection heuristic inspired by Algorithm 4, with a deterministic fallback to prevent unnecessarily sparse local neighborhoods.
+   - Balances distance minimization with angular diversity, pruning redundant long-range edges when closer alternatives exist.
+2. **Epoch-Based Visited Tracking (`EpochVisitedSet`)**:
+   - Employs an `int[] visitedEpoch` array incremented per query.
+   - Provides **zero allocation and zero clearing overhead during normal search operations**.
+3. **Decoupled Distance Evaluators**:
+   - Pure graph components (`HnswNode`, `HnswGraph`) do not hold vector data or depend on `VectorStorage`.
+   - Distances are evaluated via functional interfaces (`DistanceToQuery`, `NodeDistanceEvaluator`) injected by `HnswIndex`, ensuring strict modularity and testability.
+4. **Graph Invariant Guarantees**:
+   - **Degree Constraints**: Strictly bounded to $\le M$ for layers $l > 0$ and $\le M_0 = 2M$ for layer $0$.
+   - **Layer 0 Full Connectivity**: 100% of nodes in the index form a single connected component on layer 0 (verified by BFS).
+   - **Deterministic Reproducibility**: Fixed seed configuration produces identical graph topologies and KNN rankings.
+
+---
+
+## 📊 Empirical Recall Verification (HNSW vs FlatIndex Oracle)
+
+Recall@10 was experimentally measured on a synthetic benchmark dataset:
+- **Dataset**: $N = 1{,}000$ uniform random vectors, $D = 128$ dimensions.
+- **Queries**: $Q = 50$ random queries, $k = 10$.
+- **Graph Configuration**: $M = 16, M_0 = 32, efConstruction = 200, \text{seed} = 42$.
+- **Ground Truth**: Exact exhaustive top-10 from `FlatIndex`.
+
+### Measured Results:
+
+| `efSearch` | Measured Recall@10 | Notes |
+| :---: | :---: | :--- |
+| **10** | **74.00%** | Fastest search speed |
+| **20** | **89.00%** | Balanced speed / recall |
+| **50** | **98.40%** | High-precision retrieval |
+| **100** | **100.00%** | Perfect match with Ground Truth Oracle |
+
+> [!NOTE]
+> All figures above represent actual measured data from automated verification (`HnswRecallTest`), without rounding or synthetic extrapolation.
 
 ---
 
@@ -46,27 +105,37 @@ NanoVector
 - JDK 21 or higher (compiled with `--release 21`).
 - Git.
 
-### Build & Run Tests
-Using standard Maven Wrapper:
+### Build, Test & Verify
+NanoVector uses the Maven Wrapper (`mvnw` / `mvnw.cmd`):
 
 On Windows:
 ```powershell
-.\mvnw.cmd clean test
+.\mvnw.cmd clean verify
 ```
 
 On Linux / macOS:
 ```bash
-./mvnw clean test
+./mvnw clean verify
 ```
+
+This runs all 70 unit tests (distance metrics, storage, heaps, flat index, graph invariants, and empirical recall verification) across Linux and Windows CI.
 
 ---
 
 ## 🗺️ Roadmap & Evolutionary Milestones
 
-- [x] **v0.1**: Multi-module setup, contiguous `VectorStorage`, distance metrics, primitive `BoundedMaxHeap`, `FlatIndex` Ground Truth Oracle (26 unit tests: Distance 6, Storage 5, Heap 3, FlatIndex 7, VectorUtils 5).
-- [ ] **v0.2**: HNSW Core Graph (multi-layer routing, neighbor selection heuristic Algorithm 4).
-- [ ] **v0.3**: Epoch-based visited set optimization.
-- [ ] **v0.4**: Binary persistence (`.nvec` file format).
-- [ ] **v0.5**: Rigorous benchmark suite (Recall@K vs Latency, Memory footprint per vector).
-- [ ] **v0.6**: Standalone CLI & Spring Boot REST API.
-- [ ] **v0.7**: Experimental SIMD acceleration via Java Vector API (`jdk.incubator.vector`).
+- [x] **v0.1 (Phase 1)**: Multi-module setup, contiguous `VectorStorage`, distance metrics ($L_2^2$, Cosine, Dot Product), primitive `BoundedMaxHeap`, `FlatIndex` Ground Truth Oracle (26 unit tests).
+- [x] **v0.2 (Phase 2)**: HNSW Core Engine conforming to `VectorIndex` contract (70 unit tests):
+  - [x] Exponential level distribution generator (`LevelGenerator`).
+  - [x] $O(1)$ epoch-based visited tracking (`EpochVisitedSet`).
+  - [x] Algorithm 4 heuristic with fallback neighbor selector (`NeighborSelector`).
+  - [x] Decoupled multi-layer graph topology (`HnswNode`, `HnswGraph`).
+  - [x] Multi-layer greedy routing & `searchLayer` traversal (Algorithm 2).
+  - [x] End-to-end `HnswIndex` implementation with dynamic `efSearch`.
+  - [x] Graph invariant verification (Degree $\le M/M_0$, BFS connectivity, edge symmetry, seed determinism).
+  - [x] Empirical Recall@10 verification against `FlatIndex` Oracle.
+  - [x] Cross-platform GitHub Actions CI (Ubuntu + Windows).
+- [ ] **v0.3 (Phase 3)**: Experimental SIMD acceleration via Java Vector API (`jdk.incubator.vector`).
+- [ ] **v0.4 (Phase 4)**: Binary persistence (`.nvec` file format).
+- [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (Recall@K vs Latency, Memory footprint per vector).
+- [ ] **v0.6 (Phase 6)**: Standalone CLI & Spring Boot REST API.
