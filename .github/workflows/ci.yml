@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build & Verify (${{ matrix.os }} - JDK 21)
+    name: Build, Verify & Coverage (${{ matrix.os }} - JDK 21)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,14 +26,34 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      - name: Make mvnw executable (Unix)
+      - name: Make scripts executable (Unix)
         if: runner.os != 'Windows'
-        run: chmod +x ./mvnw
+        run: |
+          chmod +x ./mvnw
+          chmod +x setup-hooks.sh
+          chmod +x .githooks/pre-commit
+          chmod +x .githooks/pre-push
 
-      - name: Build, Test & Verify with Maven Wrapper (Unix)
+      - name: Check code formatting with Spotless (Unix)
+        if: runner.os != 'Windows'
+        run: ./mvnw spotless:check
+
+      - name: Check code formatting with Spotless (Windows)
+        if: runner.os == 'Windows'
+        run: .\mvnw.cmd spotless:check
+
+      - name: Build, Test, Verify & Generate JaCoCo Coverage (Unix)
         if: runner.os != 'Windows'
         run: ./mvnw clean verify
 
-      - name: Build, Test & Verify with Maven Wrapper (Windows)
+      - name: Build, Test, Verify & Generate JaCoCo Coverage (Windows)
         if: runner.os == 'Windows'
         run: .\mvnw.cmd clean verify
+
+      - name: Upload JaCoCo Coverage Report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: nanovector-core/target/site/jacoco/
+          retention-days: 14
