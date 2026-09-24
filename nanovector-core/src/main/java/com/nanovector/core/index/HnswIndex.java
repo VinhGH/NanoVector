@@ -51,6 +51,7 @@ public final class HnswIndex implements VectorIndex {
   private final HnswConfig config;
   private final LevelGenerator levelGenerator;
   private final EpochVisitedSet visitedSet;
+  private final NeighborSelector.NodeDistanceEvaluator nodeEvaluator;
 
   public HnswIndex(int dimension, DistanceMetric metric, HnswConfig config) {
     this(dimension, metric, config, 1024);
@@ -68,6 +69,14 @@ public final class HnswIndex implements VectorIndex {
     this.calculator = createCalculator(metric);
     this.levelGenerator = new LevelGenerator(config);
     this.visitedSet = new EpochVisitedSet(initialCapacity);
+    this.nodeEvaluator =
+        (a, b) ->
+            this.calculator.distance(
+                this.storage.getVectorBuffer(),
+                a * dimension,
+                this.storage.getVectorBuffer(),
+                b * dimension,
+                dimension);
   }
 
   private static DistanceCalculator createCalculator(DistanceMetric metric) {
@@ -112,7 +121,7 @@ public final class HnswIndex implements VectorIndex {
 
     // Build evaluators that close over storage and calculator
     HnswGraph.DistanceToQuery distanceToNew = buildDistanceToNode(internalId);
-    NeighborSelector.NodeDistanceEvaluator nodeEval = buildNodeDistanceEvaluator();
+    NeighborSelector.NodeDistanceEvaluator nodeEval = nodeEvaluator;
 
     int currentEntryPoint = graph.entryPointId();
     int currentMaxLevel = graph.maxLevel();
@@ -260,23 +269,17 @@ public final class HnswIndex implements VectorIndex {
 
   /**
    * Creates a distance-to-node function for computing distance from a stored node to other nodes.
-   * Used during insertion to evaluate distances from the new node.
+   * Evaluates distance directly from the contiguous buffer without intermediate array allocations.
    */
   private HnswGraph.DistanceToQuery buildDistanceToNode(int targetInternalId) {
     int targetOffset = targetInternalId * dimension;
-    float[] targetVec = new float[dimension];
-    System.arraycopy(storage.getVectorBuffer(), targetOffset, targetVec, 0, dimension);
+    float[] buffer = storage.getVectorBuffer();
     return internalId ->
-        calculator.distance(storage.getVectorBuffer(), internalId * dimension, targetVec);
+        calculator.distance(buffer, internalId * dimension, buffer, targetOffset, dimension);
   }
 
-  /** Creates a node-to-node distance evaluator for neighbor selection and pruning. */
-  private NeighborSelector.NodeDistanceEvaluator buildNodeDistanceEvaluator() {
-    float[] buffer = storage.getVectorBuffer();
-    return (a, b) -> {
-      float[] vecA = new float[dimension];
-      System.arraycopy(buffer, a * dimension, vecA, 0, dimension);
-      return calculator.distance(buffer, b * dimension, vecA);
-    };
+  /** Returns the reusable node-to-node distance evaluator. */
+  NeighborSelector.NodeDistanceEvaluator nodeDistanceEvaluator() {
+    return nodeEvaluator;
   }
 }

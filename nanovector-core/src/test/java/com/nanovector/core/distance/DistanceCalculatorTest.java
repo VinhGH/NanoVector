@@ -97,4 +97,63 @@ class DistanceCalculatorTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("mismatch");
   }
+
+  @Test
+  @DisplayName("Buffer-to-buffer distance: Euclidean matches standalone distance")
+  void testEuclideanBufferToBuffer() {
+    DistanceCalculator calc = new ScalarEuclideanDistance();
+    float[] buffer = {
+      1.0f, 2.0f, 3.0f, // Node 0 (offset 0)
+      4.0f, 5.0f, 6.0f, // Node 1 (offset 3)
+      7.0f, 8.0f, 9.0f // Node 2 (offset 6)
+    };
+
+    // Node 0 vs Node 1 -> (1-4)^2 + (2-5)^2 + (3-6)^2 = 27.0
+    float dist01 = calc.distance(buffer, 0, buffer, 3, 3);
+    assertThat(dist01).isEqualTo(27.0f);
+
+    // Node 1 vs Node 1 (same node) -> 0.0
+    float dist11 = calc.distance(buffer, 3, buffer, 3, 3);
+    assertThat(dist11).isEqualTo(0.0f);
+  }
+
+  @Test
+  @DisplayName("Buffer-to-buffer distance: Cosine matches standalone distance")
+  void testCosineBufferToBuffer() {
+    DistanceCalculator calc = new ScalarCosineDistance();
+    float[] buffer = {
+      1.0f, 0.0f, // Node 0
+      0.0f, 1.0f, // Node 1 (orthogonal)
+      -1.0f, 0.0f // Node 2 (opposite)
+    };
+
+    float distOrtho = calc.distance(buffer, 0, buffer, 2, 2);
+    assertThat(distOrtho).isCloseTo(1.0f, offset(1e-6f));
+
+    float distOpposite = calc.distance(buffer, 0, buffer, 4, 2);
+    assertThat(distOpposite).isCloseTo(2.0f, offset(1e-6f));
+  }
+
+  @Test
+  @DisplayName("Buffer-to-buffer distance: DotProduct matches standalone distance")
+  void testDotProductBufferToBuffer() {
+    DistanceCalculator calc = new ScalarDotProductDistance();
+    float[] buffer = {
+      1.0f, 2.0f, // Node 0
+      3.0f, 4.0f // Node 1 -> dot = 1*3 + 2*4 = 11 -> dist = -11.0
+    };
+
+    float dist = calc.distance(buffer, 0, buffer, 2, 2);
+    assertThat(dist).isEqualTo(-11.0f);
+  }
+
+  @Test
+  @DisplayName("Buffer-to-buffer out-of-bounds must throw IndexOutOfBoundsException")
+  void testBufferOutOfBounds() {
+    DistanceCalculator calc = new ScalarEuclideanDistance();
+    float[] buffer = {1.0f, 2.0f, 3.0f};
+
+    assertThatThrownBy(() -> calc.distance(buffer, 1, buffer, 0, 3))
+        .isInstanceOf(IndexOutOfBoundsException.class);
+  }
 }

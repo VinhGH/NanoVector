@@ -32,21 +32,36 @@ public final class ScalarEuclideanDistance implements DistanceCalculator {
 
   @Override
   public float distance(float[] buffer, int offset, float[] query) {
-    Objects.requireNonNull(buffer, "Buffer must not be null");
     Objects.requireNonNull(query, "Query vector must not be null");
-    if (offset < 0 || offset + query.length > buffer.length) {
+    return distance(buffer, offset, query, 0, query.length);
+  }
+
+  @Override
+  public float distance(float[] bufferA, int offsetA, float[] bufferB, int offsetB, int length) {
+    Objects.requireNonNull(bufferA, "Buffer A must not be null");
+    Objects.requireNonNull(bufferB, "Buffer B must not be null");
+    if (offsetA < 0 || offsetA + length > bufferA.length) {
       throw new IndexOutOfBoundsException(
-          "Offset and query length exceed buffer bounds: offset="
-              + offset
-              + ", query.length="
-              + query.length
-              + ", buffer.length="
-              + buffer.length);
+          "OffsetA and length exceed bufferA bounds: offsetA="
+              + offsetA
+              + ", length="
+              + length
+              + ", bufferA.length="
+              + bufferA.length);
+    }
+    if (offsetB < 0 || offsetB + length > bufferB.length) {
+      throw new IndexOutOfBoundsException(
+          "OffsetB and length exceed bufferB bounds: offsetB="
+              + offsetB
+              + ", length="
+              + length
+              + ", bufferB.length="
+              + bufferB.length);
     }
 
     float sum = 0.0f;
-    for (int i = 0; i < query.length; i++) {
-      float diff = buffer[offset + i] - query[i];
+    for (int i = 0; i < length; i++) {
+      float diff = bufferA[offsetA + i] - bufferB[offsetB + i];
       sum += diff * diff;
     }
     return sum;

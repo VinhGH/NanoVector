@@ -38,6 +38,33 @@ public interface DistanceCalculator {
   float distance(float[] buffer, int offset, float[] query);
 
   /**
+   * Calculates the distance directly between two vectors located within primitive storage buffers
+   * without allocating intermediate arrays.
+   *
+   * @param bufferA primitive float array containing vector A
+   * @param offsetA element-indexed starting position of vector A
+   * @param bufferB primitive float array containing vector B
+   * @param offsetB element-indexed starting position of vector B
+   * @param length number of vector dimensions to evaluate
+   * @return the calculated distance (smaller is closer/more similar)
+   */
+  float distance(float[] bufferA, int offsetA, float[] bufferB, int offsetB, int length);
+
+  /**
+   * Calculates the distance directly between two vectors located within the same primitive storage
+   * buffer without allocating intermediate arrays.
+   *
+   * @param buffer contiguous primitive array containing stored vectors
+   * @param offsetA element-indexed starting position of vector A
+   * @param offsetB element-indexed starting position of vector B
+   * @param length number of vector dimensions to evaluate
+   * @return the calculated distance (smaller is closer/more similar)
+   */
+  default float distance(float[] buffer, int offsetA, int offsetB, int length) {
+    return distance(buffer, offsetA, buffer, offsetB, length);
+  }
+
+  /**
    * Returns the distance metric type associated with this calculator.
    *
    * @return the {@link DistanceMetric}
