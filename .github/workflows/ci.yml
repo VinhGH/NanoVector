@@ -8,14 +8,15 @@ on:
 
 jobs:
   build:
-    name: Build & Test (JDK 21)
+    name: Build & Verify (${{ matrix.os }} - JDK 21)
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ ubuntu-latest, windows-latest ]
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
@@ -29,10 +30,10 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x ./mvnw
 
-      - name: Run Unit Tests with Maven Wrapper (Unix)
+      - name: Build, Test & Verify with Maven Wrapper (Unix)
         if: runner.os != 'Windows'
-        run: ./mvnw clean test
+        run: ./mvnw clean verify
 
-      - name: Run Unit Tests with Maven Wrapper (Windows)
+      - name: Build, Test & Verify with Maven Wrapper (Windows)
         if: runner.os == 'Windows'
-        run: .\mvnw.cmd clean test
+        run: .\mvnw.cmd clean verify
