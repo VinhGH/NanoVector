@@ -108,14 +108,17 @@ class HnswRecallTest {
     }
 
     // Quality gates:
-    // 1. Monotonicity: Recall must not decrease significantly as efSearch increases
+    // 1. Monotonicity: Recall must not decrease as efSearch increases
     assertThat(recalls[3])
         .as("Recall at efSearch=100 should be higher than at efSearch=10")
         .isGreaterThanOrEqualTo(recalls[0]);
 
-    // 2. High recall at efSearch=100 (HNSW standard should achieve > 80% on random uniform 128D)
+    // 2. High recall gates: efSearch=50 >= 90%, efSearch=100 >= 95%
+    assertThat(recalls[2])
+        .as("Recall@10 at efSearch=50 should achieve at least 90%")
+        .isGreaterThan(0.90);
     assertThat(recalls[3])
-        .as("Recall@10 at efSearch=100 should achieve at least 80%")
-        .isGreaterThan(0.80);
+        .as("Recall@10 at efSearch=100 should achieve at least 95%")
+        .isGreaterThan(0.95);
   }
 }

@@ -70,9 +70,11 @@ HnswIndex (VectorIndex contract: insert, searchKnn)
 3. **Decoupled Distance Evaluators**:
    - Pure graph components (`HnswNode`, `HnswGraph`) do not hold vector data or depend on `VectorStorage`.
    - Distances are evaluated via functional interfaces (`DistanceToQuery`, `NodeDistanceEvaluator`) injected by `HnswIndex`, ensuring strict modularity and testability.
-4. **Graph Invariant Guarantees**:
+4. **Graph Invariant Verification**:
    - **Degree Constraints**: Strictly bounded to $\le M$ for layers $l > 0$ and $\le M_0 = 2M$ for layer $0$.
    - **Layer 0 Full Connectivity**: 100% of nodes in the index form a single connected component on layer 0 (verified by BFS).
+   - **Bidirectional Edge Symmetry**: Verified 100% ($u \in \text{neighbors}(v, l) \iff v \in \text{neighbors}(u, l)$) across all layers with symmetric pruning.
+   - **Entry Point Validity**: Verified entry point is anchored at the maximum assigned graph level.
    - **Deterministic Reproducibility**: Fixed seed configuration produces identical graph topologies and KNN rankings.
 
 ---
@@ -89,9 +91,9 @@ Recall@10 was experimentally measured on a synthetic benchmark dataset:
 
 | `efSearch` | Measured Recall@10 | Notes |
 | :---: | :---: | :--- |
-| **10** | **74.00%** | Fastest search speed |
-| **20** | **89.00%** | Balanced speed / recall |
-| **50** | **98.40%** | High-precision retrieval |
+| **10** | **70.60%** | Fastest search speed |
+| **20** | **87.20%** | Balanced speed / recall |
+| **50** | **98.80%** | High-precision retrieval |
 | **100** | **100.00%** | Perfect match with Ground Truth Oracle |
 
 > [!NOTE]
@@ -132,7 +134,7 @@ This runs all 70 unit tests (distance metrics, storage, heaps, flat index, graph
   - [x] Decoupled multi-layer graph topology (`HnswNode`, `HnswGraph`).
   - [x] Multi-layer greedy routing & `searchLayer` traversal (Algorithm 2).
   - [x] End-to-end `HnswIndex` implementation with dynamic `efSearch`.
-  - [x] Graph invariant verification (Degree $\le M/M_0$, BFS connectivity, edge symmetry, seed determinism).
+  - [x] Graph invariant verification (Degree $\le M/M_0$, BFS connectivity, 100% bidirectional symmetry, seed determinism).
   - [x] Empirical Recall@10 verification against `FlatIndex` Oracle.
   - [x] Cross-platform GitHub Actions CI (Ubuntu + Windows).
 - [ ] **v0.3 (Phase 3)**: Experimental SIMD acceleration via Java Vector API (`jdk.incubator.vector`).

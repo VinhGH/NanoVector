@@ -136,12 +136,16 @@ class HnswGraphInvariantTest {
       }
     }
 
-    // Most edges should be bidirectional. Pruning may occasionally drop one side,
-    // but the vast majority of edges are symmetric.
+    // Invariant: 100% of edges must be strictly bidirectional: u in neighbors(v, l) <=> v in
+    // neighbors(u, l)
     double symmetryRatio = (double) symmetricEdges / totalDirectedEdges;
     System.out.printf(
         "Edge symmetry ratio: %.2f%% (%d / %d)%n",
         symmetryRatio * 100.0, symmetricEdges, totalDirectedEdges);
-    assertThat(symmetryRatio).isGreaterThan(0.70);
+    assertThat(symmetricEdges)
+        .as(
+            "Every directed edge in the graph must have a symmetric reverse edge (100% bidirectional)")
+        .isEqualTo(totalDirectedEdges);
+    assertThat(symmetryRatio).isEqualTo(1.0);
   }
 }

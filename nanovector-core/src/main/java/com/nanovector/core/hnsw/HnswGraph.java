@@ -261,8 +261,23 @@ public final class HnswGraph {
   }
 
   /**
+   * Removes a bidirectional edge between two nodes at the specified layer.
+   *
+   * @param nodeA internal ID of first node
+   * @param nodeB internal ID of second node
+   * @param layer the layer at which to disconnect
+   */
+  public void removeBidirectional(int nodeA, int nodeB, int layer) {
+    getNode(nodeA).removeNeighbor(layer, nodeB);
+    getNode(nodeB).removeNeighbor(layer, nodeA);
+  }
+
+  /**
    * Prunes a node's neighbor list at a given layer to at most {@code maxDegree} neighbors using the
    * {@link NeighborSelector} heuristic with fallback.
+   *
+   * <p>Removes reverse edges from neighbors that were discarded during pruning to strictly preserve
+   * the bidirectional symmetry invariant ({@code u in neighbors(v) <=> v in neighbors(u)}).
    *
    * @param node the node whose neighbors to prune
    * @param layer the layer at which to prune
@@ -284,6 +299,18 @@ public final class HnswGraph {
     }
 
     int[] pruned = NeighborSelector.selectNeighbors(candidates, maxDegree, evaluator);
+
+    // Remove reverse edges from neighbors discarded during pruning
+    boolean[] kept = new boolean[nodes.size()];
+    for (int id : pruned) {
+      kept[id] = true;
+    }
+    for (int oldNeighborId : currentNeighbors) {
+      if (!kept[oldNeighborId]) {
+        getNode(oldNeighborId).removeNeighbor(layer, nodeId);
+      }
+    }
+
     node.setNeighbors(layer, pruned);
   }
 

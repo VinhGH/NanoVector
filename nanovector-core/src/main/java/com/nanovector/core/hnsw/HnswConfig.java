@@ -9,7 +9,7 @@ package com.nanovector.core.hnsw;
  *   <li>{@code m}: Maximum number of outgoing edges per node at layers &gt; 0 (default: 16).
  *   <li>{@code m0}: Maximum number of outgoing edges per node at layer 0 (default: 2 * m = 32).
  *   <li>{@code efConstruction}: Size of dynamic candidate list during graph construction (default:
- *       100).
+ *       200).
  *   <li>{@code efSearch}: Size of dynamic candidate list during nearest-neighbor search (default:
  *       50).
  *   <li>{@code mL}: Normalization factor for exponential level generation, typically {@code 1.0 /
@@ -22,7 +22,7 @@ public record HnswConfig(int m, int m0, int efConstruction, int efSearch, double
 
   public static final int DEFAULT_M = 16;
   public static final int DEFAULT_M0 = 32;
-  public static final int DEFAULT_EF_CONSTRUCTION = 100;
+  public static final int DEFAULT_EF_CONSTRUCTION = 200;
   public static final int DEFAULT_EF_SEARCH = 50;
 
   public HnswConfig {
@@ -45,7 +45,7 @@ public record HnswConfig(int m, int m0, int efConstruction, int efSearch, double
   }
 
   /**
-   * Creates a default configuration with M = 16, M0 = 32, efConstruction = 100, efSearch = 50, mL =
+   * Creates a default configuration with M = 16, M0 = 32, efConstruction = 200, efSearch = 50, mL =
    * 1 / ln(16), and non-deterministic random generation.
    */
   public static HnswConfig defaultConfig() {

@@ -101,6 +101,31 @@ public final class HnswNode {
     neighbors[layer] = expanded;
   }
 
+  /**
+   * Removes a neighbor from this node's adjacency list at the specified layer, if present.
+   *
+   * @param layer the layer index
+   * @param neighborId internal ID of the neighbor to remove
+   */
+  public void removeNeighbor(int layer, int neighborId) {
+    checkLayerBounds(layer);
+    int[] old = neighbors[layer];
+    int index = -1;
+    for (int i = 0; i < old.length; i++) {
+      if (old[i] == neighborId) {
+        index = i;
+        break;
+      }
+    }
+    if (index == -1) {
+      return;
+    }
+    int[] updated = new int[old.length - 1];
+    System.arraycopy(old, 0, updated, 0, index);
+    System.arraycopy(old, index + 1, updated, index, old.length - index - 1);
+    neighbors[layer] = updated;
+  }
+
   private void checkLayerBounds(int layer) {
     if (layer < 0 || layer > maxLevel) {
       throw new IndexOutOfBoundsException(
