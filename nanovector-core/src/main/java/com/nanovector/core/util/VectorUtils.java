@@ -8,6 +8,8 @@ public final class VectorUtils {
   /** Epsilon threshold to detect zero or near-zero norms to prevent division by zero. */
   public static final float ZERO_NORM_THRESHOLD = 1e-9f;
 
+  private static final String VECTOR_NOT_NULL_MSG = "Vector must not be null";
+
   private VectorUtils() {
     // Utility class
   }
@@ -21,7 +23,7 @@ public final class VectorUtils {
    * @throws IllegalArgumentException if vector length does not match expectedDimension
    */
   public static void checkDimension(float[] vector, int expectedDimension) {
-    Objects.requireNonNull(vector, "Vector must not be null");
+    Objects.requireNonNull(vector, VECTOR_NOT_NULL_MSG);
     if (vector.length != expectedDimension) {
       throw new IllegalArgumentException(
           "Invalid vector dimension: expected " + expectedDimension + ", but got " + vector.length);
@@ -36,7 +38,7 @@ public final class VectorUtils {
    * @throws IllegalArgumentException if any element is NaN or Infinite
    */
   public static void checkFinite(float[] vector) {
-    Objects.requireNonNull(vector, "Vector must not be null");
+    Objects.requireNonNull(vector, VECTOR_NOT_NULL_MSG);
     for (int i = 0; i < vector.length; i++) {
       if (!Float.isFinite(vector[i])) {
         throw new IllegalArgumentException(
@@ -47,7 +49,7 @@ public final class VectorUtils {
 
   /** Computes the squared Euclidean norm ($L_2^2$) of a vector: $\sum v_i^2$. */
   public static float squaredNorm(float[] vector) {
-    Objects.requireNonNull(vector, "Vector must not be null");
+    Objects.requireNonNull(vector, VECTOR_NOT_NULL_MSG);
     float sum = 0.0f;
     for (float v : vector) {
       sum += v * v;
