@@ -151,4 +151,30 @@ class FlatIndexTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Duplicate external ID: 100");
   }
+
+  @Test
+  @DisplayName("FlatIndex supports explicit SIMD and scalar constructors")
+  void testFlatIndexSimdAndScalarModes() {
+    FlatIndex defaultIndex = new FlatIndex(4, DistanceMetric.EUCLIDEAN);
+    assertThat(defaultIndex.calculator()).isInstanceOf(ScalarEuclideanDistance.class);
+
+    FlatIndex simdIndex = new FlatIndex(4, DistanceMetric.EUCLIDEAN, true);
+    assertThat(simdIndex.calculator())
+        .isInstanceOf(com.nanovector.core.distance.VectorEuclideanDistance.class);
+
+    float[] v1 = {1.0f, 0.0f, 0.0f, 0.0f};
+    float[] v2 = {0.0f, 1.0f, 0.0f, 0.0f};
+    defaultIndex.insert(1L, v1);
+    defaultIndex.insert(2L, v2);
+    simdIndex.insert(1L, v1);
+    simdIndex.insert(2L, v2);
+
+    float[] query = {1.0f, 0.1f, 0.0f, 0.0f};
+    List<SearchResult> defaultRes = defaultIndex.searchKnn(query, 2);
+    List<SearchResult> simdRes = simdIndex.searchKnn(query, 2);
+
+    assertThat(simdRes).hasSize(2);
+    assertThat(simdRes.get(0).id()).isEqualTo(defaultRes.get(0).id()).isEqualTo(1L);
+    assertThat(simdRes.get(0).distance()).isCloseTo(defaultRes.get(0).distance(), offset(1e-5f));
+  }
 }

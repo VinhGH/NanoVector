@@ -102,10 +102,71 @@ Recall@10 was experimentally measured on a synthetic benchmark dataset:
 
 ---
 
+## ⚡ SIMD Acceleration (Java Vector API)
+
+NanoVector leverages the **Java Vector API** (`jdk.incubator.vector`) to vectorize vector distance calculations directly to hardware SIMD units (AVX2, AVX-512, NEON):
+
+- **Dynamic Hardware Adaptation**: Leverages `FloatVector.SPECIES_PREFERRED` to automatically adapt to the host CPU's optimal lane count (e.g., 256-bit AVX2 / 8 float lanes, 512-bit AVX-512 / 16 float lanes).
+- **SIMD Implementations**:
+  - `VectorEuclideanDistance`: Uses `FloatVector.sub()` and `FloatVector.fma()` with `VectorOperators.ADD` lane reduction.
+  - `VectorCosineDistance`: Direct vectorized dot product on pre-normalized vectors with non-negative clamping ($1.0f - \text{dot} \ge 0.0f$).
+  - `VectorDotProductDistance`: FMA inner product negation conforming to distance minimization.
+- **Tail-Loop Invariant**: Computes upper loop bounds with `SPECIES.loopBound(length)` and processes non-aligned remainder dimensions via a scalar tail loop, ensuring exact mathematical equivalence across arbitrary dimensions.
+- **Zero-Allocation**: Evaluates vectors directly against the contiguous `VectorStorage` buffer without array allocations.
+
+### 📈 Empirical Benchmark Results (Java 25, AVX2 256-bit / 8 lanes)
+
+#### 1. Raw Distance Calculator Throughput (Buffer-to-Query, 100k calls)
+
+| Metric | Dimension | Scalar Throughput | SIMD Throughput | Measured Speedup |
+| :--- | :---: | :---: | :---: | :---: |
+| **EUCLIDEAN** | 32 | 14.02 MOps/s | 54.42 MOps/s | **3.88x** |
+| **EUCLIDEAN** | 64 | 18.60 MOps/s | 51.58 MOps/s | **2.77x** |
+| **EUCLIDEAN** | 100 | 12.45 MOps/s | 33.28 MOps/s | **2.67x** |
+| **EUCLIDEAN** | 128 | 9.59 MOps/s | 29.62 MOps/s | **3.09x** |
+| **EUCLIDEAN** | 384 | 3.31 MOps/s | 16.35 MOps/s | **4.94x** |
+| **EUCLIDEAN** | 768 | 1.73 MOps/s | 9.59 MOps/s | **5.55x** |
+| **EUCLIDEAN** | 1536 | 0.87 MOps/s | 4.06 MOps/s | **4.68x** |
+| **COSINE** | 32 | 11.07 MOps/s | 13.70 MOps/s | **1.24x** |
+| **COSINE** | 64 | 11.70 MOps/s | 19.67 MOps/s | **1.68x** |
+| **COSINE** | 100 | 9.79 MOps/s | 17.87 MOps/s | **1.82x** |
+| **COSINE** | 128 | 8.16 MOps/s | 16.46 MOps/s | **2.02x** |
+| **COSINE** | 384 | 3.47 MOps/s | 8.61 MOps/s | **2.48x** |
+| **COSINE** | 768 | 1.72 MOps/s | 9.05 MOps/s | **5.26x** |
+| **COSINE** | 1536 | 0.87 MOps/s | 4.45 MOps/s | **5.14x** |
+| **DOT_PRODUCT** | 32 | 28.79 MOps/s | 46.71 MOps/s | **1.62x** |
+| **DOT_PRODUCT** | 64 | 16.97 MOps/s | 42.11 MOps/s | **2.48x** |
+| **DOT_PRODUCT** | 128 | 9.57 MOps/s | 16.64 MOps/s | **1.74x** |
+| **DOT_PRODUCT** | 384 | 3.46 MOps/s | 15.06 MOps/s | **4.35x** |
+| **DOT_PRODUCT** | 768 | 1.78 MOps/s | 8.75 MOps/s | **4.93x** |
+| **DOT_PRODUCT** | 1536 | 0.86 MOps/s | 4.11 MOps/s | **4.76x** |
+
+#### 2. FlatIndex Brute-Force Scan ($N=1{,}000, D=128, k=10, 5{,}000 \text{ queries}$)
+
+| Engine | QPS | Mean Latency | p50 Latency | p95 Latency | p99 Latency | Scan Speedup |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Flat (Scalar)** | 9,264 | 107.94 μs | 103.90 μs | 119.30 μs | 197.00 μs | 1.00x |
+| **Flat (SIMD)** | **31,427** | **31.82 μs** | **29.00 μs** | **41.00 μs** | **50.40 μs** | **3.39x** |
+
+#### 3. HNSW Search & Build ($N=1{,}000, D=128, M=16, efConstruction=200, k=10$)
+
+* **Build Time**: Scalar = 920.91 ms | **SIMD = 429.95 ms (2.14x faster build)**
+
+| `efSearch` | Engine | QPS | Mean Latency | p50 Latency | p99 Latency | Search Speedup |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: |
+| **10** | HNSW (Scalar) | 22,995 | 43.49 μs | 41.50 μs | 87.00 μs | 1.00x |
+| **10** | **HNSW (SIMD)** | **53,349** | **18.74 μs** | **18.00 μs** | **30.10 μs** | **2.32x** |
+| **50** | HNSW (Scalar) | 8,487 | 117.82 μs | 112.80 μs | 180.30 μs | 1.00x |
+| **50** | **HNSW (SIMD)** | **16,659** | **60.03 μs** | **56.70 μs** | **123.60 μs** | **1.96x** |
+| **100** | HNSW (Scalar) | 6,218 | 160.83 μs | 154.70 μs | 283.70 μs | 1.00x |
+| **100** | **HNSW (SIMD)** | **10,606** | **94.29 μs** | **90.20 μs** | **134.00 μs** | **1.71x** |
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
-- JDK 21 or higher (compiled with `--release 21`).
+- JDK 21 or higher (compiled with `--release 21`, compatible with JDK 25+).
 - Git.
 
 ### Build, Test & Verify
@@ -121,10 +182,15 @@ On Linux / macOS:
 ./mvnw clean verify
 ```
 
-This runs all 74 unit tests (distance metrics, storage, heaps, flat index, graph invariants, zero-allocation distance evaluations, and empirical recall verification) across Linux and Windows CI.
+This runs all 146 unit and integration tests (distance metrics, SIMD/scalar equivalence, storage, heaps, flat index, graph invariants, zero-allocation distance evaluations, and empirical recall verification) across Linux and Windows CI.
 
 ### Run Performance Benchmarks
-To measure index build throughput, search latency percentiles (p50, p95, p99), and memory allocation:
+To measure raw distance throughput and SIMD speedups across dimensions and search engines:
+```powershell
+.\mvnw.cmd test -Dtest=SimdBenchmark
+```
+
+To run HNSW build and memory allocation microbenchmarks:
 ```powershell
 .\mvnw.cmd test -Dtest=HnswBenchmark
 ```
@@ -146,7 +212,14 @@ To measure index build throughput, search latency percentiles (p50, p95, p99), a
   - [x] Empirical Recall@10 verification against `FlatIndex` Oracle.
   - [x] Microbenchmark harness (`HnswBenchmark` measuring latency percentiles, throughput, and heap allocation).
   - [x] Cross-platform GitHub Actions CI (Ubuntu + Windows).
-- [ ] **v0.3 (Phase 3)**: Experimental SIMD acceleration via Java Vector API (`jdk.incubator.vector`).
+- [x] **v0.3 (Phase 3)**: Experimental SIMD acceleration via Java Vector API (`jdk.incubator.vector`) (146 unit tests):
+  - [x] Incubator module configuration in Maven compiler, surefire, and GitHub Actions CI.
+  - [x] Vectorized distance engines (`VectorEuclideanDistance`, `VectorCosineDistance`, `VectorDotProductDistance`).
+  - [x] Hardware-adaptive lane sizing (`FloatVector.SPECIES_PREFERRED`) and scalar tail loop.
+  - [x] Comprehensive scalar vs SIMD equivalence test suite across dimensions and metrics.
+  - [x] Integration into `FlatIndex` and `HnswIndex` (default SIMD for HNSW, exact scalar oracle for Flat).
+  - [x] Comprehensive benchmark suite (`SimdBenchmark`) demonstrating up to 5.55x raw distance speedup, 3.39x brute-force scan speedup, and 2.32x HNSW search speedup.
 - [ ] **v0.4 (Phase 4)**: Binary persistence (`.nvec` file format).
 - [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (Recall@K vs Latency, Memory footprint per vector).
 - [ ] **v0.6 (Phase 6)**: Standalone CLI & Spring Boot REST API.
+

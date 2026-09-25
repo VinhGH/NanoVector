@@ -2,9 +2,6 @@ package com.nanovector.core.index;
 
 import com.nanovector.core.distance.DistanceCalculator;
 import com.nanovector.core.distance.DistanceMetric;
-import com.nanovector.core.distance.ScalarCosineDistance;
-import com.nanovector.core.distance.ScalarDotProductDistance;
-import com.nanovector.core.distance.ScalarEuclideanDistance;
 import com.nanovector.core.hnsw.EpochVisitedSet;
 import com.nanovector.core.hnsw.HnswConfig;
 import com.nanovector.core.hnsw.HnswGraph;
@@ -54,19 +51,41 @@ public final class HnswIndex implements VectorIndex {
   private final NeighborSelector.NodeDistanceEvaluator nodeEvaluator;
 
   public HnswIndex(int dimension, DistanceMetric metric, HnswConfig config) {
-    this(dimension, metric, config, 1024);
+    this(dimension, metric, config, 1024, true);
+  }
+
+  public HnswIndex(int dimension, DistanceMetric metric, HnswConfig config, boolean useSimd) {
+    this(dimension, metric, config, 1024, useSimd);
   }
 
   public HnswIndex(int dimension, DistanceMetric metric, HnswConfig config, int initialCapacity) {
+    this(dimension, metric, config, initialCapacity, true);
+  }
+
+  public HnswIndex(
+      int dimension,
+      DistanceMetric metric,
+      HnswConfig config,
+      int initialCapacity,
+      boolean useSimd) {
+    this(dimension, metric, config, initialCapacity, DistanceCalculator.create(metric, useSimd));
+  }
+
+  public HnswIndex(
+      int dimension,
+      DistanceMetric metric,
+      HnswConfig config,
+      int initialCapacity,
+      DistanceCalculator calculator) {
     if (dimension <= 0) {
       throw new IllegalArgumentException("Dimension must be positive: " + dimension);
     }
     this.dimension = dimension;
     this.metric = Objects.requireNonNull(metric, "Metric must not be null");
     this.config = Objects.requireNonNull(config, "HnswConfig must not be null");
+    this.calculator = Objects.requireNonNull(calculator, "Calculator must not be null");
     this.storage = new VectorStorage(dimension, initialCapacity);
     this.graph = new HnswGraph(config);
-    this.calculator = createCalculator(metric);
     this.levelGenerator = new LevelGenerator(config);
     this.visitedSet = new EpochVisitedSet(initialCapacity);
     this.nodeEvaluator =
@@ -77,14 +96,6 @@ public final class HnswIndex implements VectorIndex {
                 this.storage.getVectorBuffer(),
                 b * dimension,
                 dimension);
-  }
-
-  private static DistanceCalculator createCalculator(DistanceMetric metric) {
-    return switch (metric) {
-      case EUCLIDEAN -> new ScalarEuclideanDistance();
-      case COSINE -> new ScalarCosineDistance();
-      case DOT_PRODUCT -> new ScalarDotProductDistance();
-    };
   }
 
   // ── VectorIndex contract ────────────────────────────────────────────
@@ -254,6 +265,10 @@ public final class HnswIndex implements VectorIndex {
 
   public HnswGraph graph() {
     return graph;
+  }
+
+  public DistanceCalculator calculator() {
+    return calculator;
   }
 
   // ── Distance evaluator factories ────────────────────────────────────

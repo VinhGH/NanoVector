@@ -156,4 +156,33 @@ class HnswIndexTest {
     assertThatThrownBy(() -> index.searchKnn(new float[] {0f, 0f}, 1, -1))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  @DisplayName("HnswIndex defaults to SIMD and supports explicit scalar mode")
+  void testHnswIndexSimdAndScalarModes() {
+    HnswIndex defaultHnsw = new HnswIndex(4, DistanceMetric.EUCLIDEAN, CONFIG);
+    assertThat(defaultHnsw.calculator())
+        .isInstanceOf(com.nanovector.core.distance.VectorEuclideanDistance.class);
+
+    HnswIndex scalarHnsw = new HnswIndex(4, DistanceMetric.EUCLIDEAN, CONFIG, false);
+    assertThat(scalarHnsw.calculator())
+        .isInstanceOf(com.nanovector.core.distance.ScalarEuclideanDistance.class);
+
+    float[] v1 = {1.0f, 0.0f, 0.0f, 0.0f};
+    float[] v2 = {0.0f, 1.0f, 0.0f, 0.0f};
+    defaultHnsw.insert(1L, v1);
+    defaultHnsw.insert(2L, v2);
+    scalarHnsw.insert(1L, v1);
+    scalarHnsw.insert(2L, v2);
+
+    float[] query = {1.0f, 0.1f, 0.0f, 0.0f};
+    List<SearchResult> defaultRes = defaultHnsw.searchKnn(query, 2);
+    List<SearchResult> scalarRes = scalarHnsw.searchKnn(query, 2);
+
+    assertThat(defaultRes).hasSize(2);
+    assertThat(scalarRes).hasSize(2);
+    assertThat(defaultRes.get(0).id()).isEqualTo(scalarRes.get(0).id()).isEqualTo(1L);
+    assertThat(defaultRes.get(0).distance())
+        .isCloseTo(scalarRes.get(0).distance(), org.assertj.core.data.Offset.offset(1e-5f));
+  }
 }

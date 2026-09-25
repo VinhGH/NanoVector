@@ -2,9 +2,6 @@ package com.nanovector.core.index;
 
 import com.nanovector.core.distance.DistanceCalculator;
 import com.nanovector.core.distance.DistanceMetric;
-import com.nanovector.core.distance.ScalarCosineDistance;
-import com.nanovector.core.distance.ScalarDotProductDistance;
-import com.nanovector.core.distance.ScalarEuclideanDistance;
 import com.nanovector.core.heap.BoundedMaxHeap;
 import com.nanovector.core.model.SearchResult;
 import com.nanovector.core.storage.VectorStorage;
@@ -31,25 +28,35 @@ public final class FlatIndex implements VectorIndex {
   private final VectorStorage storage;
 
   public FlatIndex(int dimension, DistanceMetric metric) {
-    this(dimension, metric, 1024);
+    this(dimension, metric, 1024, false);
+  }
+
+  public FlatIndex(int dimension, DistanceMetric metric, boolean useSimd) {
+    this(dimension, metric, 1024, useSimd);
   }
 
   public FlatIndex(int dimension, DistanceMetric metric, int initialCapacity) {
+    this(dimension, metric, initialCapacity, false);
+  }
+
+  public FlatIndex(int dimension, DistanceMetric metric, int initialCapacity, boolean useSimd) {
+    this(dimension, metric, initialCapacity, DistanceCalculator.create(metric, useSimd));
+  }
+
+  public FlatIndex(
+      int dimension, DistanceMetric metric, int initialCapacity, DistanceCalculator calculator) {
     if (dimension <= 0) {
       throw new IllegalArgumentException("Dimension must be positive: " + dimension);
     }
     this.dimension = dimension;
     this.metric = Objects.requireNonNull(metric, "Metric must not be null");
+    this.calculator = Objects.requireNonNull(calculator, "Calculator must not be null");
     this.storage = new VectorStorage(dimension, initialCapacity);
-    this.calculator = createCalculator(metric);
   }
 
-  private static DistanceCalculator createCalculator(DistanceMetric metric) {
-    return switch (metric) {
-      case EUCLIDEAN -> new ScalarEuclideanDistance();
-      case COSINE -> new ScalarCosineDistance();
-      case DOT_PRODUCT -> new ScalarDotProductDistance();
-    };
+  /** Returns the distance calculator used by this index. */
+  public DistanceCalculator calculator() {
+    return calculator;
   }
 
   @Override
