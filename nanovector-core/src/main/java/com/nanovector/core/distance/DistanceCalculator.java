@@ -70,4 +70,41 @@ public interface DistanceCalculator {
    * @return the {@link DistanceMetric}
    */
   DistanceMetric metric();
+
+  /**
+   * Creates a distance calculator for the specified metric, with SIMD acceleration controlled by
+   * {@code useSimd}.
+   *
+   * @param metric distance metric type
+   * @param useSimd {@code true} to use Java Vector API SIMD implementations; {@code false} for
+   *     scalar fallback
+   * @return the distance calculator instance
+   */
+  static DistanceCalculator create(DistanceMetric metric, boolean useSimd) {
+    java.util.Objects.requireNonNull(metric, "Metric must not be null");
+    if (useSimd) {
+      return switch (metric) {
+        case EUCLIDEAN -> new VectorEuclideanDistance();
+        case COSINE -> new VectorCosineDistance();
+        case DOT_PRODUCT -> new VectorDotProductDistance();
+      };
+    } else {
+      return switch (metric) {
+        case EUCLIDEAN -> new ScalarEuclideanDistance();
+        case COSINE -> new ScalarCosineDistance();
+        case DOT_PRODUCT -> new ScalarDotProductDistance();
+      };
+    }
+  }
+
+  /**
+   * Creates a distance calculator for the specified metric with SIMD acceleration enabled by
+   * default.
+   *
+   * @param metric distance metric type
+   * @return the SIMD distance calculator instance
+   */
+  static DistanceCalculator create(DistanceMetric metric) {
+    return create(metric, true);
+  }
 }
