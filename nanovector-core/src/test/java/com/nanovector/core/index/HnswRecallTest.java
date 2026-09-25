@@ -60,11 +60,17 @@ class HnswRecallTest {
       flatIndex.insert(i, dataset.get(i));
     }
 
-    // Build HnswIndex
+    // Build Scalar HnswIndex
     HnswConfig config = HnswConfig.defaultConfig().withSeed(SEED);
-    HnswIndex hnswIndex = new HnswIndex(DIMENSION, DistanceMetric.EUCLIDEAN, config);
+    HnswIndex scalarHnsw = new HnswIndex(DIMENSION, DistanceMetric.EUCLIDEAN, config, false);
     for (int i = 0; i < NUM_VECTORS; i++) {
-      hnswIndex.insert(i, dataset.get(i));
+      scalarHnsw.insert(i, dataset.get(i));
+    }
+
+    // Build SIMD HnswIndex
+    HnswIndex simdHnsw = new HnswIndex(DIMENSION, DistanceMetric.EUCLIDEAN, config, true);
+    for (int i = 0; i < NUM_VECTORS; i++) {
+      simdHnsw.insert(i, dataset.get(i));
     }
 
     // Compute Ground Truth results for all queries
@@ -80,45 +86,67 @@ class HnswRecallTest {
 
     // Measure Recall@10 at various efSearch values
     int[] efSearchValues = {10, 20, 50, 100};
-    double[] recalls = new double[efSearchValues.length];
+    double[] scalarRecalls = new double[efSearchValues.length];
+    double[] simdRecalls = new double[efSearchValues.length];
 
     System.out.println(
         "=== HNSW Recall@10 vs FlatIndex Oracle (N=1000, D=128, Q=50, M=16, efConstruction=200) ===");
+    System.out.printf("%-9s | %-16s | %-16s%n", "efSearch", "Scalar Recall@10", "SIMD Recall@10");
+    System.out.println("----------+------------------+------------------");
 
     for (int e = 0; e < efSearchValues.length; e++) {
       int ef = efSearchValues[e];
-      int totalHits = 0;
+      int scalarHits = 0;
+      int simdHits = 0;
 
       for (int q = 0; q < NUM_QUERIES; q++) {
         float[] query = queries.get(q);
         Set<Long> gtIds = groundTruthSets.get(q);
 
-        List<SearchResult> hnswResults = hnswIndex.searchKnn(query, K, ef);
-        for (SearchResult r : hnswResults) {
+        List<SearchResult> scalarResults = scalarHnsw.searchKnn(query, K, ef);
+        for (SearchResult r : scalarResults) {
           if (gtIds.contains(r.id())) {
-            totalHits++;
+            scalarHits++;
+          }
+        }
+
+        List<SearchResult> simdResults = simdHnsw.searchKnn(query, K, ef);
+        for (SearchResult r : simdResults) {
+          if (gtIds.contains(r.id())) {
+            simdHits++;
           }
         }
       }
 
-      double recall = (double) totalHits / (NUM_QUERIES * K);
-      recalls[e] = recall;
-      System.out.printf(
-          "  efSearch = %3d -> Recall@10 = %.4f (%.2f%%)%n", ef, recall, recall * 100.0);
+      double sRecall = (double) scalarHits / (NUM_QUERIES * K);
+      double vRecall = (double) simdHits / (NUM_QUERIES * K);
+      scalarRecalls[e] = sRecall;
+      simdRecalls[e] = vRecall;
+
+      System.out.printf("  %-7d | %14.2f%%   | %14.2f%%%n", ef, sRecall * 100.0, vRecall * 100.0);
     }
 
     // Quality gates:
     // 1. Monotonicity: Recall must not decrease as efSearch increases
-    assertThat(recalls[3])
-        .as("Recall at efSearch=100 should be higher than at efSearch=10")
-        .isGreaterThanOrEqualTo(recalls[0]);
+    assertThat(simdRecalls[3])
+        .as("SIMD Recall at efSearch=100 should be higher than at efSearch=10")
+        .isGreaterThanOrEqualTo(simdRecalls[0]);
+    assertThat(scalarRecalls[3])
+        .as("Scalar Recall at efSearch=100 should be higher than at efSearch=10")
+        .isGreaterThanOrEqualTo(scalarRecalls[0]);
 
     // 2. High recall gates: efSearch=50 >= 90%, efSearch=100 >= 95%
-    assertThat(recalls[2])
-        .as("Recall@10 at efSearch=50 should achieve at least 90%")
+    assertThat(simdRecalls[2])
+        .as("SIMD Recall@10 at efSearch=50 should achieve at least 90%")
         .isGreaterThan(0.90);
-    assertThat(recalls[3])
-        .as("Recall@10 at efSearch=100 should achieve at least 95%")
+    assertThat(simdRecalls[3])
+        .as("SIMD Recall@10 at efSearch=100 should achieve at least 95%")
+        .isGreaterThan(0.95);
+    assertThat(scalarRecalls[2])
+        .as("Scalar Recall@10 at efSearch=50 should achieve at least 90%")
+        .isGreaterThan(0.90);
+    assertThat(scalarRecalls[3])
+        .as("Scalar Recall@10 at efSearch=100 should achieve at least 95%")
         .isGreaterThan(0.95);
   }
 }

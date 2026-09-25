@@ -13,7 +13,7 @@ NanoVector
 │
 ├── nanovector-core          # Vector storage, distance metrics, heap, FlatIndex, and HNSW
 ├── nanovector-persistence   # Binary serialization format (.nvec) for saving/loading indexes
-├── nanovector-benchmark     # Benchmarking suite (Recall@K, Latency P50/P90/P99, Memory profiling)
+├── nanovector-benchmark     # Benchmarking suite (Recall@K, Latency P50/P95/P99, Memory profiling)
 ├── nanovector-cli           # Standalone command-line interface
 └── nanovector-server        # Spring Boot REST API for exposing the search engine
 ```
@@ -30,13 +30,13 @@ NanoVector
    - **Squared Euclidean ($L_2^2$)**: $\sum (a_i - b_i)^2$ (square root omitted to save CPU cycles).
    - **Cosine Distance**: $1.0f - (u \cdot v)$ on pre-normalized unit vectors.
    - **Dot Product**: $-(u \cdot v)$ (negated to conform to minimization).
-3. **Allocation-Free Scan Loop**:
+3. **Allocation-Free Distance Scan**:
    - Distance computations run directly against the internal contiguous buffer.
    - Zero heap allocations during the distance scan.
 4. **Deterministic Tie-Breaking**:
    - When distances are identical, ranking defaults to `externalId` ascending, ensuring 100% reproducible search results.
-5. **Exact Ground Truth Baseline**:
-   - `FlatIndex` ($O(N)$ sequential scan) acts as the exact reference oracle for measuring recall in approximate nearest neighbor (ANN) graphs.
+5. **Exact Reference Baseline**:
+   - `FlatIndex` ($O(N)$ sequential scan) acts as the exact reference oracle for measuring recall in approximate nearest neighbor (ANN) graphs under NanoVector's floating-point metric implementation.
 
 ---
 
@@ -67,10 +67,10 @@ HnswIndex (VectorIndex contract: insert, searchKnn)
 2. **Epoch-Based Visited Tracking (`EpochVisitedSet`)**:
    - Employs an `int[] visitedEpoch` array incremented per query.
    - Provides **zero allocation and zero clearing overhead during normal search operations**.
-3. **Zero-Allocation Distance Path (Decoupled Evaluators)**:
+3. **Zero-Allocation Distance Evaluation Path (Decoupled Evaluators)**:
    - Pure graph components (`HnswNode`, `HnswGraph`) do not hold vector data or depend on `VectorStorage`.
    - Distances are evaluated via functional interfaces (`DistanceToQuery`, `NodeDistanceEvaluator`) injected by `HnswIndex`, ensuring strict modularity and testability.
-   - Vector distances directly evaluate contiguous storage slices via primitive buffer offsets (`distance(buffer, offsetA, buffer, offsetB, length)`), eliminating all `float[]` heap allocations during node routing and pruning (-98% heap allocation reduction during graph construction).
+   - Vector distances directly evaluate contiguous storage slices via primitive buffer offsets (`distance(buffer, offsetA, buffer, offsetB, length)`), eliminating all `float[]` heap allocations during node routing and pruning.
 4. **Graph Invariant Verification**:
    - **Degree Constraints**: Strictly bounded to $\le M$ for layers $l > 0$ and $\le M_0 = 2M$ for layer $0$.
    - **Layer 0 Full Connectivity**: 100% of nodes in the index form a single connected component on layer 0 (verified by BFS).
@@ -86,19 +86,19 @@ Recall@10 was experimentally measured on a synthetic benchmark dataset:
 - **Dataset**: $N = 1{,}000$ uniform random vectors, $D = 128$ dimensions.
 - **Queries**: $Q = 50$ random queries, $k = 10$.
 - **Graph Configuration**: $M = 16, M_0 = 32, efConstruction = 200, \text{seed} = 42$.
-- **Ground Truth**: Exact exhaustive top-10 from `FlatIndex`.
+- **Ground Truth**: Exact exhaustive top-10 from `FlatIndex` reference oracle.
 
-### Measured Results:
+### Measured Results (Scalar HNSW vs SIMD HNSW):
 
-| `efSearch` | Measured Recall@10 | Notes |
-| :---: | :---: | :--- |
-| **10** | **70.60%** | Fastest search speed |
-| **20** | **87.20%** | Balanced speed / recall |
-| **50** | **98.80%** | High-precision retrieval |
-| **100** | **100.00%** | Perfect match with Ground Truth Oracle |
+| `efSearch` | Scalar Recall@10 | SIMD Recall@10 | Retrieval Quality Preservation |
+| :---: | :---: | :---: | :--- |
+| **10** | **70.60%** | **70.60%** | Exact match |
+| **20** | **87.20%** | **87.20%** | Exact match |
+| **50** | **98.80%** | **98.80%** | Exact match |
+| **100** | **100.00%** | **100.00%** | Perfect match with Ground Truth Oracle |
 
 > [!NOTE]
-> All figures above represent actual measured data from automated verification (`HnswRecallTest`), without rounding or synthetic extrapolation.
+> All figures above represent actual measured data from automated verification (`HnswRecallTest`), confirming that SIMD acceleration fully preserved retrieval quality under the tested configuration.
 
 ---
 
@@ -106,13 +106,16 @@ Recall@10 was experimentally measured on a synthetic benchmark dataset:
 
 NanoVector leverages the **Java Vector API** (`jdk.incubator.vector`) to vectorize vector distance calculations directly to hardware SIMD units (AVX2, AVX-512, NEON):
 
-- **Dynamic Hardware Adaptation**: Leverages `FloatVector.SPECIES_PREFERRED` to automatically adapt to the host CPU's optimal lane count (e.g., 256-bit AVX2 / 8 float lanes, 512-bit AVX-512 / 16 float lanes).
+- **Hardware Adaptation**: Leverages `FloatVector.SPECIES_PREFERRED` to allow the JVM runtime to select the preferred vector species for the host platform (in our benchmark environment: 256-bit AVX2 with 8 float lanes on Java 25).
 - **SIMD Implementations**:
-  - `VectorEuclideanDistance`: Uses `FloatVector.sub()` and `FloatVector.fma()` with `VectorOperators.ADD` lane reduction.
-  - `VectorCosineDistance`: Direct vectorized dot product on pre-normalized vectors with non-negative clamping ($1.0f - \text{dot} \ge 0.0f$).
+  - `VectorEuclideanDistance`: Uses `FloatVector.sub()` and `FloatVector.fma()` with `VectorOperators.ADD` lane reduction. FMA operations give the JVM/JIT an opportunity to lower the multiply-add operation to hardware fused multiply-add instructions on supported CPUs.
+  - `VectorCosineDistance`: Direct vectorized dot product on pre-normalized vectors with non-negative clamping ($\max(0.0f, 1.0f - \text{dot})$).
   - `VectorDotProductDistance`: FMA inner product negation conforming to distance minimization.
-- **Tail-Loop Invariant**: Computes upper loop bounds with `SPECIES.loopBound(length)` and processes non-aligned remainder dimensions via a scalar tail loop, ensuring exact mathematical equivalence across arbitrary dimensions.
-- **Zero-Allocation**: Evaluates vectors directly against the contiguous `VectorStorage` buffer without array allocations.
+- **Tail-Loop Invariant**: Computes upper loop bounds with `SPECIES.loopBound(length)` and processes non-aligned remainder dimensions via a scalar tail loop, ensuring numerical equivalence within tolerance across arbitrary dimensions.
+- **Zero-Allocation Distance Evaluation**: Evaluates vectors directly against the contiguous `VectorStorage` buffer without heap array allocations in the hot distance calculation path.
+
+> [!TIP]
+> **Bottleneck Propagation Insight**: NanoVector's SIMD distance kernels achieved up to 5.55× higher measured throughput than the scalar baseline on the benchmark environment. End-to-end acceleration was lower—3.39× for FlatIndex and 1.71–2.32× for HNSW—demonstrating that graph traversal, visited set lookups, and candidate queue management become increasingly significant portions of total search cost.
 
 ### 📈 Empirical Benchmark Results (Java 25, AVX2 256-bit / 8 lanes)
 
@@ -207,7 +210,7 @@ To run HNSW build and memory allocation microbenchmarks:
   - [x] Decoupled multi-layer graph topology (`HnswNode`, `HnswGraph`).
   - [x] Multi-layer greedy routing & `searchLayer` traversal (Algorithm 2).
   - [x] End-to-end `HnswIndex` implementation with dynamic `efSearch`.
-  - [x] Zero-allocation distance hot path (eliminated intermediate array copying during node distance calculations).
+  - [x] Zero-allocation distance evaluation hot path (eliminated intermediate array copying during node distance calculations).
   - [x] Graph invariant verification (Degree $\le M/M_0$, BFS connectivity, 100% bidirectional symmetry, seed determinism).
   - [x] Empirical Recall@10 verification against `FlatIndex` Oracle.
   - [x] Microbenchmark harness (`HnswBenchmark` measuring latency percentiles, throughput, and heap allocation).
@@ -217,9 +220,10 @@ To run HNSW build and memory allocation microbenchmarks:
   - [x] Vectorized distance engines (`VectorEuclideanDistance`, `VectorCosineDistance`, `VectorDotProductDistance`).
   - [x] Hardware-adaptive lane sizing (`FloatVector.SPECIES_PREFERRED`) and scalar tail loop.
   - [x] Comprehensive scalar vs SIMD equivalence test suite across dimensions and metrics.
-  - [x] Integration into `FlatIndex` and `HnswIndex` (default SIMD for HNSW, exact scalar oracle for Flat).
+  - [x] Integration into `FlatIndex` and `HnswIndex` (default SIMD for HNSW, exact scalar reference oracle for Flat).
   - [x] Comprehensive benchmark suite (`SimdBenchmark`) demonstrating up to 5.55x raw distance speedup, 3.39x brute-force scan speedup, and 2.32x HNSW search speedup.
 - [ ] **v0.4 (Phase 4)**: Binary persistence (`.nvec` file format).
-- [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (Recall@K vs Latency, Memory footprint per vector).
-- [ ] **v0.6 (Phase 6)**: Standalone CLI & Spring Boot REST API.
+- [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (JMH microbenchmarking, Scalar vs SIMD topology/recall comparison, scale profiling).
+- [ ] **v0.6 (Phase 6)**: Scale & memory experiments (quantization study, off-heap MemorySegment evaluation).
+- [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.
 
