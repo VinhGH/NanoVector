@@ -27,12 +27,14 @@
         <maven.compiler.version>3.13.0</maven.compiler.version>
         <maven.surefire.version>3.2.5</maven.surefire.version>
         <spotbugs.version>4.8.6.6</spotbugs.version>
+        <jmh.version>1.37</jmh.version>
         <argLine></argLine>
     </properties>
 
     <modules>
         <module>nanovector-core</module>
         <module>nanovector-persistence</module>
+        <module>nanovector-benchmark</module>
     </modules>
 
     <dependencyManagement>
