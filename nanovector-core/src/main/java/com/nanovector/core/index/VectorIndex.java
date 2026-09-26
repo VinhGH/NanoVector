@@ -33,4 +33,12 @@ public interface VectorIndex {
 
   /** Returns the distance metric used by this index. */
   DistanceMetric metric();
+
+  /**
+   * Returns a read-only data view of the underlying vector storage.
+   *
+   * <p>The returned view provides zero-copy access to the internal buffers and must be treated as
+   * read-only by contract.
+   */
+  com.nanovector.core.storage.VectorDataView vectorData();
 }

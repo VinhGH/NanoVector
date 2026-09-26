@@ -166,6 +166,118 @@ NanoVector leverages the **Java Vector API** (`jdk.incubator.vector`) to vectori
 
 ---
 
+## 💾 Binary Persistence (NVEC v1 Format)
+
+NanoVector features **NVEC v1 binary persistence with defensive validation and round-trip behavioral verification** (`nanovector-persistence`). It provides high-throughput binary serialization and deserialization for both `FlatIndex` and `HnswIndex` while preserving strict modularity and avoiding unnecessary defensive copies at the storage boundary.
+
+### Architectural Separation & Controlled Bridges
+
+```text
+┌────────────────────────────────────────────────────────┐
+│                   nanovector-core                      │
+│                                                        │
+│  ┌──────────────────────┐    ┌──────────────────────┐  │
+│  │   VectorDataView     │    │    IndexRestorer     │  │
+│  │ (Read-only contract) │    │  (Controlled Bridge) │  │
+│  └──────────▲───────────┘    └──────────┬───────────┘  │
+│             │                           │              │
+│       VectorStorage                 FlatIndex /        │
+│    (internal buffers)                HnswIndex         │
+└─────────────┼───────────────────────────▲──────────────┘
+              │                           │
+              │       nanovector-persistence
+              │                           │
+        ┌─────┴──────────┐         ┌──────┴─────────┐
+        │   NvecWriter   │         │   NvecReader   │
+        │ (Save to disk) │         │ (Load to core) │
+        └────────────────┘         └────────────────┘
+```
+
+1. **`VectorDataView` (Read-Only Contract)**:
+   - Exposes direct sequential access to `vectorBuffer()` (`float[]`) and `externalIdBuffer()` (`long[]`).
+   - The returned buffer is the internal storage buffer and must be treated as **read-only by contract** by callers, eliminating heap cloning during serialization.
+2. **`IndexRestorer` (Controlled Internal Bridge)**:
+   - Resides in `nanovector-core` (`com.nanovector.core.index`) to allow `NvecReader` to construct indexes directly from restored buffers without exposing public mutating setters or compromising core encapsulation.
+3. **Direct Verbatim $O(E)$ HNSW Restoration**:
+   - `NvecReader` restores nodes, layer assignments, and neighbor adjacency arrays directly from the serialized topology.
+   - **Strictly avoids rebuilding the graph**: No re-running neighbor discovery, heuristic pruning, or `connect()` passes. The graph topology is reconstructed verbatim in $O(E)$ time.
+
+---
+
+### Binary Format Layout (`.nvec`)
+
+The NVEC v1 specification (`FORMAT_SPEC_V1.md`) uses an explicit **Little-Endian** byte ordering as a format choice to guarantee deterministic cross-platform reproducibility across architectures.
+
+| Section | Size | Description |
+| :--- | :---: | :--- |
+| **Header** | 32 bytes | Magic (`NVEC`), Version (`1`), Endianness (`1`), IndexType (`1`=FLAT, `2`=HNSW), Metric (`1`=L2, `2`=Cosine, `3`=Dot), Dimension ($D$), VectorCount ($N$), Reserved (4B) |
+| **Metadata Block** | Variable | 4-byte `metadata_length` prefix.<br>• **FLAT**: `metadata_length = 0` (4 bytes total).<br>• **HNSW**: `metadata_length = 24` prefix + 24-byte payload ($M, M_0, efConstruction, defaultEfSearch, maxLevel, entryPointId$) = 28 bytes total. |
+| **Vector Data** | $N \times D \times 4$ bytes | Contiguous IEEE-754 32-bit single-precision floats. |
+| **External IDs** | $N \times 8$ bytes | 64-bit signed integers mapping internal slots to external IDs. |
+| **HNSW Topology** | Variable | *(HNSW only)* Per-node layer count, and per-layer neighbor count followed by neighbor internal IDs. |
+| **CRC32C Footer** | 4 bytes | Hardware-accelerated Castagnoli CRC-32C calculated over bytes $[0, \text{fileSize} - 4)$. |
+
+---
+
+### Bounded-Memory Chunked I/O & Atomic Move
+
+- **Bounded-Memory Chunked I/O**: `NvecWriter` serializes float buffers and external IDs in fixed 8 KB chunks, maintaining a running CRC32C digest without buffering whole files in heap memory.
+- **Atomic Replacement with Fallback**: Saves first to a temporary file (`.tmp`) and swaps atomically via `Files.move(..., ATOMIC_MOVE)`. If atomic move is unsupported across filesystem boundaries, falls back safely to `REPLACE_EXISTING`.
+- **Pre-Write Invariant Checks**: Rejects non-finite floats (`NaN`, `Infinity`), rejects non-unit vectors under `COSINE` distance without silently mutating data, and enforces topology degree invariants ($\le M, \le M_0$).
+
+---
+
+### 8-Step Defense-in-Depth Validation Pipeline
+
+`NvecReader` enforces strict validation before constructing indexes:
+
+```text
+1. File Size Gate      (fileSize >= 40 bytes)
+       │
+2. Header Validation   (Magic 'NVEC', Version 1, Little-Endian, valid IndexType & Metric)
+       │
+3. Structural Bounds   (Detects arithmetic overflow and rejects huge dimension/vectorCount before allocation)
+       │
+4. CRC32C Integrity   (Streams file bytes [0, fileSize-4) and verifies against footer)
+       │
+5. Metadata Block      (Reads metadata_length; forward-compatible skip for unknown extensions)
+       │
+6. Direct Restoration  (Reads vector & ID buffers directly into VectorStorage without extra defensive copying)
+       │
+7. Topology Invariants (HNSW only: validates entryPoint and neighbor ID references < vectorCount)
+       │
+8. Controlled Rebuild  (Restores index via IndexRestorer bridge)
+```
+
+> [!IMPORTANT]
+> **Pre-Allocation Structural Bounds**: Checking $(long) vectorCount \times dimension$ against the actual file size before allocating memory prevents out-of-memory (OOM) denial-of-service vulnerabilities caused by malformed headers with valid CRCs.
+
+---
+
+### 📈 Measured Persistence Benchmarks (NVEC v1)
+
+Measured on Windows 11, amd64, Java 25 (targeting `--release 21`), synthetic benchmark dataset ($D=128$, `EUCLIDEAN`):
+
+| Index Type | Vector Count ($N$) | File Size | Bytes / Vector | Save Time | Write Throughput | Load Time | Read Throughput | CRC32C Stream Rate* | Top-K Match |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **FLAT** | 1,000 | 520,040 B (0.50 MB) | 520.0 B | 6.54 ms | 75.81 MB/s | 3.65 ms | 135.97 MB/s | 472.01 MB/s | **100%** |
+| **FLAT** | 10,000 | 5,200,040 B (4.96 MB) | 520.0 B | 24.31 ms | 204.04 MB/s | 9.30 ms | **533.04 MB/s** | 1,776.01 MB/s | **100%** |
+| **HNSW** | 1,000 | 638,336 B (0.61 MB) | 638.3 B | 8.84 ms | 68.89 MB/s | 3.24 ms | 187.93 MB/s | 784.49 MB/s | **100%** |
+| **HNSW** | 10,000 | 6,357,070 B (6.06 MB) | 635.7 B | 27.57 ms | 219.92 MB/s | 26.31 ms | **230.41 MB/s** | 2,392.40 MB/s | **100%** |
+
+*Notes: HNSW Configuration: $M=16, M_0=32, efConstruction=200, defaultEfSearch=50$. Ground truth behavioral equivalence verified with float tolerance $10^{-5}$. CRC32C stream rate reflects the measured throughput through Java's CRC32C streaming digest pipeline under this specific benchmark configuration, rather than an isolated hardware limit.*
+
+#### Engineering Trade-Off Analysis
+
+1. **Storage Footprint**:
+   - **FLAT Index**: Pure raw storage efficiency ($520.0$ bytes/vector: 512 bytes for 128 floats + 8 bytes for external ID). Metadata and headers account for only 40 bytes overhead.
+   - **HNSW Index**: Adds ~115.7 bytes/vector overhead to store the multi-layer navigable small-world graph topology (node levels, degree counts, and directed neighbor adjacency lists bounded by $M_0=32, M=16$).
+2. **Deserialization Latency**:
+   - Direct buffer restoration restores 10,000 128-dimensional Flat vectors in **9.30 ms** (533 MB/s).
+   - Verbatim $O(E)$ HNSW topology reconstruction restores 10,000 nodes across all graph layers in **26.31 ms** (230 MB/s), restoring the persisted topology directly and avoiding graph reconstruction during load (for reference, index build took ~430 ms under this benchmark configuration).
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -185,7 +297,7 @@ On Linux / macOS:
 ./mvnw clean verify
 ```
 
-This runs all 146 unit and integration tests (distance metrics, SIMD/scalar equivalence, storage, heaps, flat index, graph invariants, zero-allocation distance evaluations, and empirical recall verification) across Linux and Windows CI.
+This runs all 204 unit and integration tests (distance metrics, SIMD/scalar equivalence, storage, heaps, flat index, graph invariants, zero-allocation distance evaluations, empirical recall verification, and NVEC v1 binary persistence round-trips) across Linux and Windows CI.
 
 ### Run Performance Benchmarks
 To measure raw distance throughput and SIMD speedups across dimensions and search engines:
@@ -196,6 +308,11 @@ To measure raw distance throughput and SIMD speedups across dimensions and searc
 To run HNSW build and memory allocation microbenchmarks:
 ```powershell
 .\mvnw.cmd test -Dtest=HnswBenchmark
+```
+
+To run NVEC v1 binary persistence serialization and deserialization benchmarks:
+```powershell
+.\mvnw.cmd test -Dtest=PersistenceBenchmark
 ```
 
 ---
@@ -222,7 +339,13 @@ To run HNSW build and memory allocation microbenchmarks:
   - [x] Comprehensive scalar vs SIMD equivalence test suite across dimensions and metrics.
   - [x] Integration into `FlatIndex` and `HnswIndex` (default SIMD for HNSW, exact scalar reference oracle for Flat).
   - [x] Comprehensive benchmark suite (`SimdBenchmark`) demonstrating up to 5.55x raw distance speedup, 3.39x brute-force scan speedup, and 2.32x HNSW search speedup.
-- [ ] **v0.4 (Phase 4)**: Binary persistence (`.nvec` file format).
+- [x] **v0.4 (Phase 4)**: Binary persistence (`.nvec` NVEC v1 Format) (58 tests in persistence module, 204 total):
+  - [x] Binary format specification (`FORMAT_SPEC_V1.md`) with Little-Endian portability, 32B header, 28B HNSW metadata block, and CRC32C footer.
+  - [x] `VectorDataView` read-only contract and `IndexRestorer` controlled internal bridge.
+  - [x] Bounded-memory chunked I/O serializer (`NvecWriter`) with streaming CRC32C, atomic `.tmp` replace, and pre-write invariant checks.
+  - [x] 8-step defense-in-depth deserializer (`NvecReader`) with pre-allocation bounds checks preventing OOM and forward-compatible metadata parsing.
+  - [x] Direct verbatim $O(E)$ HNSW topology reconstruction without heuristic re-clustering or graph rebuild.
+  - [x] End-to-end integration and round-trip persistence benchmark (`PersistenceBenchmark`).
 - [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (JMH microbenchmarking, Scalar vs SIMD topology/recall comparison, scale profiling).
 - [ ] **v0.6 (Phase 6)**: Scale & memory experiments (quantization study, off-heap MemorySegment evaluation).
 - [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.

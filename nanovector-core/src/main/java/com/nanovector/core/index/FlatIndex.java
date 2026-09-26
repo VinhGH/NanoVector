@@ -54,6 +54,18 @@ public final class FlatIndex implements VectorIndex {
     this.storage = new VectorStorage(dimension, initialCapacity);
   }
 
+  /** Package-private constructor for IndexRestorer to restore index without re-allocation. */
+  FlatIndex(
+      int dimension, DistanceMetric metric, VectorStorage storage, DistanceCalculator calculator) {
+    if (dimension <= 0) {
+      throw new IllegalArgumentException("Dimension must be positive: " + dimension);
+    }
+    this.dimension = dimension;
+    this.metric = Objects.requireNonNull(metric, "Metric must not be null");
+    this.storage = Objects.requireNonNull(storage, "Storage must not be null");
+    this.calculator = Objects.requireNonNull(calculator, "Calculator must not be null");
+  }
+
   /** Returns the distance calculator used by this index. */
   public DistanceCalculator calculator() {
     return calculator;
@@ -92,7 +104,7 @@ public final class FlatIndex implements VectorIndex {
     int actualK = Math.min(k, total);
     BoundedMaxHeap heap = new BoundedMaxHeap(actualK);
 
-    float[] buffer = storage.getVectorBuffer();
+    float[] buffer = storage.vectorBuffer();
     for (int i = 0; i < total; i++) {
       int offset = i * dimension;
       float dist = calculator.distance(buffer, offset, effectiveQuery);
@@ -116,6 +128,11 @@ public final class FlatIndex implements VectorIndex {
   @Override
   public DistanceMetric metric() {
     return metric;
+  }
+
+  @Override
+  public com.nanovector.core.storage.VectorDataView vectorData() {
+    return storage;
   }
 
   /** Retrieves stored vector copy for inspection/testing. */

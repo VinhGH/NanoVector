@@ -32,6 +32,7 @@
 
     <modules>
         <module>nanovector-core</module>
+        <module>nanovector-persistence</module>
     </modules>
 
     <dependencyManagement>

@@ -97,7 +97,7 @@ public class SimdBenchmark {
           }
           storage.insert(i, v);
         }
-        float[] buffer = storage.getVectorBuffer();
+        float[] buffer = storage.vectorBuffer();
 
         float[] query = randomVector(dim, rng);
         if (metric == DistanceMetric.COSINE) {

@@ -91,9 +91,38 @@ public final class HnswIndex implements VectorIndex {
     this.nodeEvaluator =
         (a, b) ->
             this.calculator.distance(
-                this.storage.getVectorBuffer(),
+                this.storage.vectorBuffer(),
                 a * dimension,
-                this.storage.getVectorBuffer(),
+                this.storage.vectorBuffer(),
+                b * dimension,
+                dimension);
+  }
+
+  /** Package-private constructor for IndexRestorer to restore index with verbatim topology. */
+  HnswIndex(
+      int dimension,
+      DistanceMetric metric,
+      HnswConfig config,
+      VectorStorage storage,
+      HnswGraph graph,
+      DistanceCalculator calculator) {
+    if (dimension <= 0) {
+      throw new IllegalArgumentException("Dimension must be positive: " + dimension);
+    }
+    this.dimension = dimension;
+    this.metric = Objects.requireNonNull(metric, "Metric must not be null");
+    this.config = Objects.requireNonNull(config, "HnswConfig must not be null");
+    this.calculator = Objects.requireNonNull(calculator, "Calculator must not be null");
+    this.storage = Objects.requireNonNull(storage, "Storage must not be null");
+    this.graph = Objects.requireNonNull(graph, "Graph must not be null");
+    this.levelGenerator = new LevelGenerator(config);
+    this.visitedSet = new EpochVisitedSet(Math.max(1024, storage.size() + 1));
+    this.nodeEvaluator =
+        (a, b) ->
+            this.calculator.distance(
+                this.storage.vectorBuffer(),
+                a * dimension,
+                this.storage.vectorBuffer(),
                 b * dimension,
                 dimension);
   }
@@ -257,6 +286,11 @@ public final class HnswIndex implements VectorIndex {
     return metric;
   }
 
+  @Override
+  public com.nanovector.core.storage.VectorDataView vectorData() {
+    return storage;
+  }
+
   // ── Configuration accessors ─────────────────────────────────────────
 
   public HnswConfig config() {
@@ -278,7 +312,7 @@ public final class HnswIndex implements VectorIndex {
    * contiguous VectorStorage buffer (zero-copy).
    */
   private HnswGraph.DistanceToQuery buildDistanceToQuery(float[] queryVector) {
-    float[] buffer = storage.getVectorBuffer();
+    float[] buffer = storage.vectorBuffer();
     return internalId -> calculator.distance(buffer, internalId * dimension, queryVector);
   }
 
@@ -288,7 +322,7 @@ public final class HnswIndex implements VectorIndex {
    */
   private HnswGraph.DistanceToQuery buildDistanceToNode(int targetInternalId) {
     int targetOffset = targetInternalId * dimension;
-    float[] buffer = storage.getVectorBuffer();
+    float[] buffer = storage.vectorBuffer();
     return internalId ->
         calculator.distance(buffer, internalId * dimension, buffer, targetOffset, dimension);
   }
