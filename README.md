@@ -278,6 +278,82 @@ Measured on Windows 11, amd64, Java 25 (targeting `--release 21`), synthetic ben
 
 ---
 
+## 🔬 Rigorous JMH Benchmark Suite (`nanovector-benchmark`)
+
+NanoVector includes an isolated benchmarking module (`nanovector-benchmark`) powered by **JMH 1.37 (Java Microbenchmark Harness)** to empirically evaluate performance hypotheses without confounding factors (JIT compilation noise, GC pauses, dead-code elimination, or pre-assumed speedups).
+
+All benchmarks run with Compiler Blackholes, JIT warmup cycles (2 iterations $\times$ 500 ms), measurement iterations (3 iterations $\times$ 500 ms), and isolated process forks on JDK 25 (`--release 21`, `--add-modules jdk.incubator.vector`).
+
+### 1. Distance Kernel Factorial Matrix (Scalar vs SIMD)
+
+Evaluated across 36 factorial configurations: 3 metrics (`EUCLIDEAN`, `COSINE`, `DOT_PRODUCT`) $\times$ 6 dimensions (32, 64, 128, 384, 768, 1536) $\times$ 2 engines (Scalar vs SIMD):
+
+- **Peak Speedup Range**: SIMD acceleration delivers between **~2.7x** ($D=32$) and **~7.0x–7.35x** ($D=384$), tapering to **~5.3x–6.1x** at higher dimensions ($D=1536$).
+- **Experimental Control**: Input vectors are pre-generated with fixed seeds outside timed regions; cosine normalization is performed strictly in `@Setup`.
+
+### 2. End-to-End Search Throughput & Amdahl's Law Evaluation
+
+Measured on synthetic datasets ($D=128$, `EUCLIDEAN`, $k=10$, $efSearch=50$, 128 queries cycled via Blackhole):
+
+| Index Architecture | Vector Count ($N$) | Scalar Throughput | SIMD Throughput | SIMD Speedup |
+| :--- | :---: | :---: | :---: | :---: |
+| **FlatIndex** | 1,000 | 10,177 ops/s | 51,132 ops/s | **5.02x** |
+| **FlatIndex** | 10,000 | 1,038 ops/s | 3,092 ops/s | **2.98x** |
+| **HnswIndex** | 1,000 | 9,131 ops/s | 18,321 ops/s | **2.01x** |
+| **HnswIndex** | 10,000 | 3,932 ops/s | 6,354 ops/s | **1.62x** |
+
+> [!NOTE]
+> **Amdahl's Law in Action**:
+> - FlatIndex có mức phụ thuộc cao hơn vào distance computation, thể hiện qua SIMD speedup 5.02× ở $N=1{,}000$ và 2.98× ở $N=10{,}000$.
+> - Trong HnswIndex, ngoài tính khoảng cách còn có chi phí duyệt đồ thị (truy xuất láng giềng, bitset/epoch set, heap candidates), khiến tốc độ tăng tốc end-to-end chỉ đạt **1.62x–2.01x** dù raw distance kernel tăng tốc hơn 5x.
+> - **Empirical scaling**: Flat throughput giảm khoảng 9.8× khi $N$ tăng 10×, trong khi HNSW giảm khoảng 2.3× trong workload này.
+
+### 3. HNSW Pareto Frontier: Recall@10 vs Latency / Throughput
+
+Swept across beam search widths ($efSearch \in \{10, 20, 50, 100, 200\}$) on $N=10{,}000$, $D=128$, `EUCLIDEAN`, $k=10$, measured against the exact `FlatIndex` reference oracle:
+
+| `efSearch` | Empirical Recall@10 | Scalar QPS | SIMD QPS | SIMD Speedup |
+| :---: | :---: | :---: | :---: | :---: |
+| **10** | 29.38% | 12,106 ops/s | 24,632 ops/s | **2.03x** |
+| **20** | 44.53% | 7,577 ops/s | 15,657 ops/s | **2.07x** |
+| **50** | 68.05% | 3,941 ops/s | 7,274 ops/s | **1.85x** |
+| **100** | 85.47% | 2,206 ops/s | 3,734 ops/s | **1.69x** |
+| **200** | 96.25% | 1,184 ops/s | 2,062 ops/s | **1.74x** |
+
+- **Recall Invariance**: Scalar and SIMD produced identical measured Recall@10 across all tested `efSearch` values under this benchmark configuration.
+- **Pareto Trade-off**: Increasing `efSearch` from 10 to 200 lifts Recall@10 from **29.38%** to **96.25%**, with a corresponding ~12x reduction in search throughput (from 24.6K ops/s down to 2.0K ops/s).
+
+### 4. Allocation & GC Profiling (`-prof gc`)
+
+Empirical testing of heap allocation behavior using JMH's normalized allocation profiler (`·gc.alloc.rate.norm`):
+
+| Search Operation | Dataset Size ($N$) | Normalized Allocation (`B/op`) | Empirical Analysis |
+| :--- | :---: | :---: | :--- |
+| `baselineRawDistance` | 1K & 10K | **$\approx 10^{-4}$ B/op** | Effectively 0 B/op at the JMH measurement resolution; no meaningful heap allocation was observed in the raw primitive distance kernel. |
+| `searchFlat` | 1,000 | **560.29 B/op** | Allocation remained approximately constant as $N$ increased from 1K to 10K under fixed $K$ (~560 B vs ~564 B; $N$-element distance scan generates zero allocations). |
+| `searchFlat` | 10,000 | **564.36 B/op** | |
+| `searchHnsw` ($ef=10$) | 10,000 | **2,074.14 B/op** | **Disproving zero-allocation for HNSW search**: Graph traversal allocates candidate nodes in dynamic priority queues and instantiates `SearchResult` records, scaling with beam width. |
+| `searchHnsw` ($ef=50$) | 10,000 | **8,969.04 B/op** | |
+| `searchHnsw` ($ef=100$) | 10,000 | **15,401.95 B/op** | |
+
+### 5. Graph Topology Divergence & Construction Acceleration
+
+Comparing Scalar-constructed vs SIMD-constructed graphs ($N=1{,}000$, $D=128$, `EUCLIDEAN`, Seed=42):
+
+- **Topology Consistency**: No topology divergence was observed under this benchmark configuration:
+  - Entry point: identical (Node 571)
+  - Max level: identical (Level 2)
+  - Total edges: 28,794 (Scalar) vs 28,794 (SIMD)
+  - Shared edges: **28,794 (Edge Jaccard Similarity: 100.0000%)**
+  - Identical nodes ratio: **100.00%**
+  - Search Top-10 overlap across 100 queries: **100.00%**
+- **Construction Throughput**: Under this benchmark configuration, SIMD distance acceleration sped up HNSW index construction by **~3.00×** (from ~704 ms to ~235 ms per 1,000 vectors).
+
+> [!IMPORTANT]
+> **Summary Takeaway**: Raw SIMD distance đạt mức tăng tốc lớn, nhưng end-to-end HNSW chỉ đạt 1.62–2.01× ở workload được đo, trong khi JMH cho thấy HNSW search vẫn phát sinh allocation đáng kể.
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -297,22 +373,26 @@ On Linux / macOS:
 ./mvnw clean verify
 ```
 
-This runs all 204 unit and integration tests (distance metrics, SIMD/scalar equivalence, storage, heaps, flat index, graph invariants, zero-allocation distance evaluations, empirical recall verification, and NVEC v1 binary persistence round-trips) across Linux and Windows CI.
+This runs all **215 unit and integration tests** (Core: 146, Persistence: 58, Benchmark: 11; 0 failures, 0 errors, 0 skipped) across Linux and Windows CI.
 
 ### Run Performance Benchmarks
-To measure raw distance throughput and SIMD speedups across dimensions and search engines:
-```powershell
-.\mvnw.cmd test -Dtest=SimdBenchmark
-```
 
-To run HNSW build and memory allocation microbenchmarks:
+To run the JMH benchmark suite packaged in `benchmarks.jar`:
 ```powershell
-.\mvnw.cmd test -Dtest=HnswBenchmark
-```
+# Run distance kernel benchmarks across metrics and dimensions
+java --add-modules jdk.incubator.vector -jar nanovector-benchmark/target/benchmarks.jar ScalarVsSimdDistanceBenchmark
 
-To run NVEC v1 binary persistence serialization and deserialization benchmarks:
-```powershell
-.\mvnw.cmd test -Dtest=PersistenceBenchmark
+# Run Flat vs HNSW search throughput benchmarks
+java --add-modules jdk.incubator.vector -jar nanovector-benchmark/target/benchmarks.jar FlatVsHnswSearchBenchmark
+
+# Sweep HNSW Pareto frontier (Recall vs Latency)
+java --add-modules jdk.incubator.vector -jar nanovector-benchmark/target/benchmarks.jar EfSearchRecallLatencyBenchmark
+
+# Profile heap allocation and GC rates
+java --add-modules jdk.incubator.vector -jar nanovector-benchmark/target/benchmarks.jar SearchAllocationBenchmark -prof gc
+
+# Run graph topology divergence and construction benchmarks
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.topology.GraphTopologyDivergenceBenchmark
 ```
 
 ---
@@ -346,7 +426,14 @@ To run NVEC v1 binary persistence serialization and deserialization benchmarks:
   - [x] 8-step defense-in-depth deserializer (`NvecReader`) with pre-allocation bounds checks preventing OOM and forward-compatible metadata parsing.
   - [x] Direct verbatim $O(E)$ HNSW topology reconstruction without heuristic re-clustering or graph rebuild.
   - [x] End-to-end integration and round-trip persistence benchmark (`PersistenceBenchmark`).
-- [ ] **v0.5 (Phase 5)**: Rigorous benchmark suite (JMH microbenchmarking, Scalar vs SIMD topology/recall comparison, scale profiling).
+- [x] **v0.5 (Phase 5)**: Rigorous JMH benchmark suite (`nanovector-benchmark`) (11 benchmark tests, 215 total):
+  - [x] JMH harness setup with Maven shade plugin (`benchmarks.jar`), compiler blackholes, and zero coupling with persistence.
+  - [x] Comprehensive 36-case distance kernel benchmark matrix (`ScalarVsSimdDistanceBenchmark`).
+  - [x] Flat vs HNSW search benchmark evaluating Amdahl's Law and scale properties (`FlatVsHnswSearchBenchmark`).
+  - [x] HNSW Pareto frontier exploration sweeping Recall@10 vs QPS across $efSearch$ (`EfSearchRecallLatencyBenchmark`).
+  - [x] Heap allocation and GC rate profiling benchmark with `-prof gc` (`SearchAllocationBenchmark`).
+  - [x] HNSW topology divergence analysis and index construction throughput benchmark (`GraphTopologyDivergenceBenchmark`).
 - [ ] **v0.6 (Phase 6)**: Scale & memory experiments (quantization study, off-heap MemorySegment evaluation).
 - [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.
+
 
