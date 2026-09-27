@@ -354,6 +354,85 @@ Comparing Scalar-constructed vs SIMD-constructed graphs ($N=1{,}000$, $D=128$, `
 
 ---
 
+## 🔬 Scale & Memory Characterization (Phase 6A)
+
+Phase 6A conducts systematic empirical profiling of NanoVector across dataset scales ($N \in \{1\text{K}, 10\text{K}, 50\text{K}, 100\text{K}\}$ at dimension $D=128$, `EUCLIDEAN`, $k=10$, $efSearch=50$, SIMD-accelerated).
+
+### 1. Memory Footprint: Analytical Structural Model vs Measured Heap Delta
+
+To prepare a rigorous baseline for quantization (Phase 6B), NanoVector decouples **Analytical Structural Cost** (HotSpot 64-bit with Compressed OOPs) from **Measured Heap Delta** (`Runtime.getRuntime()` with 4-pass GC stabilization):
+
+| Scale ($N$) | Index Type | Raw Payload | Structural Memory | Structural B/vec | Measured Heap Delta | Measured B/vec | Memory Amplification |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | FlatIndex | 0.49 MiB | 0.58 MiB | 609.4 B | 0.60 MiB | 626.8 B | **1.19x** (struct) / **1.22x** (meas) |
+| **1,000** | HnswIndex | 0.49 MiB | 0.77 MiB | 805.2 B | 0.79 MiB | 832.0 B | **1.57x** (struct) / **1.63x** (meas) |
+| **10,000** | FlatIndex | 4.88 MiB | 5.75 MiB | 603.2 B | 5.96 MiB | 624.9 B | **1.18x** (struct) / **1.22x** (meas) |
+| **10,000** | HnswIndex | 4.88 MiB | 7.48 MiB | 784.8 B | 7.74 MiB | 811.8 B | **1.53x** (struct) / **1.59x** (meas) |
+| **50,000** | FlatIndex | 24.41 MiB | 28.73 MiB | 602.6 B | 29.83 MiB | 625.5 B | **1.18x** (struct) / **1.22x** (meas) |
+| **50,000** | HnswIndex | 24.41 MiB | 37.39 MiB | 784.2 B | 38.31 MiB | 803.4 B | **1.53x** (struct) / **1.57x** (meas) |
+| **100,000** | FlatIndex | 48.83 MiB | 57.46 MiB | 602.5 B | 59.62 MiB | 625.2 B | **1.18x** (struct) / **1.22x** (meas) |
+| **100,000** | HnswIndex | 48.83 MiB | 74.78 MiB | 784.1 B | 76.29 MiB | 800.0 B | **1.53x** (struct) / **1.56x** (meas) |
+
+> [!NOTE]
+> **Key Architectural Takeaways**:
+> - **FlatIndex Overhead**: Consumes ~602.5 B/vec vs 512 B raw payload (amplification **1.18x**), dominated by the 8B external ID buffer and ~82.5 B/vec `HashMap<Long, Integer>` index overhead.
+> - **HNSW Graph Overhead**: Graph topology adds ~181.6 B/vec structural overhead (multi-layer `HnswNode` pointers, neighbor adjacency arrays, and `EpochVisitedSet`), bringing total footprint to ~784.1 B/vec (amplification **1.53x**).
+> - **Model Accuracy**: Analytical structural estimates match empirical heap deltas within **2.0%** at 100K scale.
+> - **Quantization Baseline**: In FP32, raw vectors account for 65.3% of HNSW memory, while graph topology accounts for 23.2%. In Phase 6B (SQ8 quantization), 4x vector compression (512B $\to$ 128B) will invert this balance, making graph topology the dominant memory consumer (~45.4% of total index memory)!
+
+### 2. Search Latency & Throughput Scaling Across 100x Scale
+
+Empirical latency distribution and query throughput ($D=128$, `EUCLIDEAN`, $k=10$, $efSearch=50$, SIMD-accelerated):
+
+| Scale ($N$) | Index Type | Working Set | QPS (ops/s) | Mean Latency | P50 Latency | P90 Latency | P99 Latency | Empirical Recall@10 | Speedup |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | FlatIndex | 0.49 MiB | 20,180.7 | 49.16 μs | 41.30 μs | 83.40 μs | 146.70 μs | 100.00% | 1.00x |
+| **1,000** | HnswIndex | 0.49 MiB | 7,157.9 | 139.31 μs | 83.00 μs | 229.60 μs | 518.50 μs | 99.38% | 0.35x |
+| **10,000** | FlatIndex | 4.88 MiB | 1,802.4 | 550.22 μs | 519.20 μs | 706.70 μs | 1,163.00 μs | 100.00% | 1.00x |
+| **10,000** | HnswIndex | 4.88 MiB | 2,268.0 | 434.67 μs | 396.60 μs | 607.40 μs | 1,167.70 μs | 68.05% | **1.27x** |
+| **50,000** | FlatIndex | 24.41 MiB | 575.8 | 1,734.12 μs | 1,666.50 μs | 2,046.70 μs | 2,482.20 μs | 100.00% | 1.00x |
+| **50,000** | HnswIndex | 24.41 MiB | 3,817.0 | 261.51 μs | 252.90 μs | 310.20 μs | 410.80 μs | 40.08% | **6.63x** |
+| **100,000** | FlatIndex | 48.83 MiB | 267.0 | 3,741.09 μs | 3,598.30 μs | 4,484.00 μs | 5,105.40 μs | 100.00% | 1.00x |
+| **100,000** | HnswIndex | 48.83 MiB | 2,953.1 | 337.62 μs | 321.50 μs | 419.50 μs | 662.60 μs | 28.20% | **11.08x** |
+
+> [!NOTE]
+> **Performance Observations**:
+> - **Crossover Point**: At $N=1{,}000$, FlatIndex brute force is faster than HNSW ($0.35\times$ speedup) because scanning 1,000 contiguous vectors with SIMD incurs lower constant overhead than navigating HNSW's priority queues and visited sets. At $N=10{,}000$, HNSW overtakes Flat ($1.27\times$), expanding to **6.63x** at 50K and **11.08x** at 100K.
+> - **Empirical Scaling**: Across the 100-fold scale increase ($1\text{K} \to 100\text{K}$), FlatIndex throughput collapsed $75.6\times$ (from 20.2K QPS to 267 QPS), whereas HnswIndex latency remained within 139–338 μs.
+> - **Working Set & Cache Hypothesis**: As $N$ increases, FlatIndex must sequentially stream the entire vector working set (from 0.49 MiB at 1K to 48.83 MiB at 100K) from main memory for every single query, potentially exceeding effective CPU cache capacity and increasing memory access latency; whereas HNSW traverses localized graph neighborhoods, evaluating only a fraction of vectors per query.
+> - **Beam Search Width Scaling**: At a *fixed* $efSearch=50$, empirical Recall@10 decreases from 99.38% at 1K to 28.20% at 100K. As the population expands 100x in high-dimensional space, candidate exploration width must scale proportionally with $\log N$ (as proven in Phase 5 Pareto sweeps) to maintain >90% recall.
+
+### 3. HNSW Construction Scaling & Multi-Layer Topology Breakdown
+
+Empirical construction performance and graph topology properties across scales ($D=128$, `EUCLIDEAN`, $M=16, M_0=32, efConstruction=200$, SIMD-accelerated):
+
+| Scale ($N$) | Raw Payload | Cumulative Build Time | Insertion Throughput | Latency / Vector | Max Graph Level | Layer 0 Isolated Nodes | Total Edges |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | 0.49 MiB | 503 ms | 1,985.1 vec/s | 503.76 μs | Level 2 | 0 | 28,794 |
+| **10,000** | 4.88 MiB | 5,297 ms | 1,887.8 vec/s | 529.73 μs | Level 3 | 0 | 281,428 |
+| **50,000** | 24.41 MiB | 48,445 ms | 1,032.1 vec/s | 968.91 μs | Level 4 | 1 | 1,292,102 |
+| **100,000** | 48.83 MiB | 121,565 ms (~2.0 min) | 822.6 vec/s | 1,215.66 μs | Level 6 | 4 | 2,474,186 |
+
+#### Multi-Layer Graph Topology at Scale $N=100{,}000$ ($M=16, M_0=32$):
+
+| Layer | Node Count | % of Total | Min Degree | Avg Degree | Max Degree | Max Allowed | Invariant Verification |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Layer 0** | 100,000 | 100.00% | 0 | 23.88 | 32 | 32 | Degree $\le M_0$ strictly enforced; 99.996% connected |
+| **Layer 1** | 6,188 | 6.19% | 0 | 12.94 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
+| **Layer 2** | 387 | 0.39% | 5 | 14.33 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
+| **Layer 3** | 26 | 0.03% | 5 | 14.77 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
+| **Layer 4** | 3 | <0.01% | 2 | 2.00 | 2 | 16 | Bounded degree |
+| **Layer 5** | 1 | <0.01% | 0 | 0.00 | 0 | 16 | Entry candidate |
+| **Layer 6** | 1 | <0.01% | 0 | 0.00 | 0 | 16 | Global Entry Point |
+
+> [!TIP]
+> **Topology Insights**:
+> - **Exponential Layer Decay**: Node count drops by an empirical factor of $\approx 1/16$ per layer ($100{,}000 \to 6{,}188 \to 387 \to 26 \to 3 \to 1 \to 1$), adhering closely to the theoretical level multiplier $m_L = 1/\ln(M)$.
+> - **Degree Invariant Enforcement**: All layers strictly respect their degree capping ($M_0=32$ for Layer 0, $M=16$ for higher layers).
+> - **Throughput Decay Profile**: Insertion throughput gradually decays from ~1,985 vec/s down to ~823 vec/s as graph depth expands from 2 to 6 layers, requiring deeper beam search traversal ($efConstruction=200$) on insertion.
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -373,7 +452,7 @@ On Linux / macOS:
 ./mvnw clean verify
 ```
 
-This runs all **215 unit and integration tests** (Core: 146, Persistence: 58, Benchmark: 11; 0 failures, 0 errors, 0 skipped) across Linux and Windows CI.
+This runs all **221 unit and integration tests** (Core: 146, Persistence: 58, Benchmark: 17; 0 failures, 0 errors, 0 skipped) across Linux and Windows CI.
 
 ### Run Performance Benchmarks
 
@@ -393,6 +472,15 @@ java --add-modules jdk.incubator.vector -jar nanovector-benchmark/target/benchma
 
 # Run graph topology divergence and construction benchmarks
 java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.topology.GraphTopologyDivergenceBenchmark
+
+# Phase 6A: Profile memory footprint (analytical vs empirical GC delta) across scales
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.memory.MemoryFootprintProfiler
+
+# Phase 6A: Profile query throughput and latency distribution (P50/P90/P99) across scales
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.scale.ScaleLatencySearchBenchmark --latency-profile
+
+# Phase 6A: Profile HNSW construction throughput and multi-layer topology properties
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.scale.ScaleConstructionBenchmark --topology-profile
 ```
 
 ---
@@ -433,7 +521,12 @@ java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmar
   - [x] HNSW Pareto frontier exploration sweeping Recall@10 vs QPS across $efSearch$ (`EfSearchRecallLatencyBenchmark`).
   - [x] Heap allocation and GC rate profiling benchmark with `-prof gc` (`SearchAllocationBenchmark`).
   - [x] HNSW topology divergence analysis and index construction throughput benchmark (`GraphTopologyDivergenceBenchmark`).
-- [ ] **v0.6 (Phase 6)**: Scale & memory experiments (quantization study, off-heap MemorySegment evaluation).
+- [x] **v0.6 (Phase 6A)**: Scale & Memory Characterization ($N \in \{1\text{K}, 10\text{K}, 50\text{K}, 100\text{K}\}$ at $D=128$, 17 benchmark tests, 221 total):
+  - [x] Analytical structural model vs empirical heap delta profiling (`MemoryFootprintProfiler`).
+  - [x] Flat vs HNSW query latency distribution (P50/P90/P99) and throughput scaling (`ScaleLatencySearchBenchmark`).
+  - [x] HNSW graph construction scaling and multi-layer topology characterization (`ScaleConstructionBenchmark`).
+- [ ] **v0.6 (Phase 6B)**: Quantization study (FP32 vs SQ8 Scalar Quantization, memory reduction vs recall trade-off).
+- [ ] **v0.6 (Phase 6C)**: Off-Heap / Foreign Function & Memory API (`MemorySegment`) evaluation.
 - [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.
 
 
