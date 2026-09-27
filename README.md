@@ -377,8 +377,8 @@ To prepare a rigorous baseline for quantization (Phase 6B), NanoVector decouples
 > **Key Architectural Takeaways**:
 > - **FlatIndex Overhead**: Consumes ~602.5 B/vec vs 512 B raw payload (amplification **1.18x**), dominated by the 8B external ID buffer and ~82.5 B/vec `HashMap<Long, Integer>` index overhead.
 > - **HNSW Graph Overhead**: Graph topology adds ~181.6 B/vec structural overhead (multi-layer `HnswNode` pointers, neighbor adjacency arrays, and `EpochVisitedSet`), bringing total footprint to ~784.1 B/vec (amplification **1.53x**).
-> - **Model Accuracy**: Analytical structural estimates match empirical heap deltas within **2.0%** at 100K scale.
-> - **Quantization Baseline**: In FP32, raw vectors account for 65.3% of HNSW memory, while graph topology accounts for 23.2%. In Phase 6B (SQ8 quantization), 4x vector compression (512B $\to$ 128B) will invert this balance, making graph topology the dominant memory consumer (~45.4% of total index memory)!
+> - **Model Accuracy**: Analytical structural estimates match empirical heap deltas within **2.0%** at 100K scale under the tested JVM configuration.
+> - **Analytical Projection for Phase 6B (Scalar Quantization SQ8)**: In FP32, raw vectors account for 65.3% of HNSW memory, while graph topology accounts for 23.2%. Under an analytical SQ8 projection (1 byte/dimension), 4x vector compression (512B $\to$ 128B) would invert this ratio, reducing total projected HNSW memory to ~38.16 MiB where graph topology becomes the dominant memory consumer (~45.4% of total index memory).
 
 ### 2. Search Latency & Throughput Scaling Across 100x Scale
 
@@ -397,10 +397,11 @@ Empirical latency distribution and query throughput ($D=128$, `EUCLIDEAN`, $k=10
 
 > [!NOTE]
 > **Performance Observations**:
-> - **Crossover Point**: At $N=1{,}000$, FlatIndex brute force is faster than HNSW ($0.35\times$ speedup) because scanning 1,000 contiguous vectors with SIMD incurs lower constant overhead than navigating HNSW's priority queues and visited sets. At $N=10{,}000$, HNSW overtakes Flat ($1.27\times$), expanding to **6.63x** at 50K and **11.08x** at 100K.
+> - **Crossover Point**: At $N=1{,}000$, FlatIndex brute force is faster than HNSW ($0.35\times$ throughput) because scanning 1,000 contiguous vectors with SIMD incurs lower constant overhead than navigating HNSW's priority queues and visited sets. At $N=10{,}000$, HNSW overtakes Flat ($1.27\times$), expanding to **6.63x** at 50K and **11.08x** at 100K.
+> - **Speedup vs Recall Interdependence**: At $N=100\text{K}$, HnswIndex achieves **11.08x higher throughput** than FlatIndex (2,953 ops/s vs 267 ops/s) under the tested $efSearch=50$ configuration, though at a lower Recall@10 of 28.20%. In approximate nearest neighbor search, throughput speedup cannot be evaluated independently from the corresponding recall level.
 > - **Empirical Scaling**: Across the 100-fold scale increase ($1\text{K} \to 100\text{K}$), FlatIndex throughput collapsed $75.6\times$ (from 20.2K QPS to 267 QPS), whereas HnswIndex latency remained within 139–338 μs.
-> - **Working Set & Cache Hypothesis**: As $N$ increases, FlatIndex must sequentially stream the entire vector working set (from 0.49 MiB at 1K to 48.83 MiB at 100K) from main memory for every single query, potentially exceeding effective CPU cache capacity and increasing memory access latency; whereas HNSW traverses localized graph neighborhoods, evaluating only a fraction of vectors per query.
-> - **Beam Search Width Scaling**: At a *fixed* $efSearch=50$, empirical Recall@10 decreases from 99.38% at 1K to 28.20% at 100K. As the population expands 100x in high-dimensional space, candidate exploration width must scale proportionally with $\log N$ (as proven in Phase 5 Pareto sweeps) to maintain >90% recall.
+> - **Sequential Scan vs Graph Traversal**: Each FlatIndex query sequentially scans the entire contiguous vector payload (from 0.49 MiB at 1K up to 48.83 MiB at 100K). At 100K scale, this payload exceeds typical CPU L3 cache capacities, which can necessitate DRAM fetches for each query and constrain throughput; whereas HnswIndex evaluates only a small subset of vectors along the traversal path (cache residency and bus traffic were not measured directly via hardware performance counters).
+> - **Search Budget Scaling**: At a *fixed* $efSearch=50$, empirical Recall@10 decreases from 99.38% at 1K down to 28.20% at 100K. This confirms that a fixed candidate budget cannot maintain retrieval quality as the graph search space expands 100-fold; achieving target recall at scale requires scaling the search budget ($efSearch$), though determining the exact scaling relationship (e.g. logarithmic vs polynomial) requires further multi-parameter Pareto sweeps.
 
 ### 3. HNSW Construction Scaling & Multi-Layer Topology Breakdown
 
@@ -408,28 +409,32 @@ Empirical construction performance and graph topology properties across scales (
 
 | Scale ($N$) | Raw Payload | Cumulative Build Time | Insertion Throughput | Latency / Vector | Max Graph Level | Layer 0 Isolated Nodes | Total Edges |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1,000** | 0.49 MiB | 503 ms | 1,985.1 vec/s | 503.76 μs | Level 2 | 0 | 28,794 |
-| **10,000** | 4.88 MiB | 5,297 ms | 1,887.8 vec/s | 529.73 μs | Level 3 | 0 | 281,428 |
-| **50,000** | 24.41 MiB | 48,445 ms | 1,032.1 vec/s | 968.91 μs | Level 4 | 1 | 1,292,102 |
-| **100,000** | 48.83 MiB | 121,565 ms (~2.0 min) | 822.6 vec/s | 1,215.66 μs | Level 6 | 4 | 2,474,186 |
+| **1,000** | 0.49 MiB | 491 ms | 2,034.8 vec/s | 491.44 μs | Level 2 | **0** | 28,796 |
+| **10,000** | 4.88 MiB | 5,545 ms | 1,803.3 vec/s | 554.55 μs | Level 3 | **0** | 281,452 |
+| **50,000** | 24.41 MiB | 47,836 ms | 1,045.2 vec/s | 956.72 μs | Level 4 | **0** | 1,292,374 |
+| **100,000** | 48.83 MiB | 117,858 ms (~1.96 min) | 848.5 vec/s | 1,178.59 μs | Level 6 | **0** | 2,475,330 |
 
 #### Multi-Layer Graph Topology at Scale $N=100{,}000$ ($M=16, M_0=32$):
 
 | Layer | Node Count | % of Total | Min Degree | Avg Degree | Max Degree | Max Allowed | Invariant Verification |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Layer 0** | 100,000 | 100.00% | 0 | 23.88 | 32 | 32 | Degree $\le M_0$ strictly enforced; 99.996% connected |
-| **Layer 1** | 6,188 | 6.19% | 0 | 12.94 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
+| **Layer 0** | 100,000 | 100.00% | **1** | 23.89 | 32 | 32 | Degree $\le M_0$ strictly enforced; 100% connected (0 isolated nodes) |
+| **Layer 1** | 6,188 | 6.19% | 0* | 12.94 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
 | **Layer 2** | 387 | 0.39% | 5 | 14.33 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
 | **Layer 3** | 26 | 0.03% | 5 | 14.77 | 16 | 16 | Degree $\le M$ strictly enforced; ~1/16 decay ratio |
 | **Layer 4** | 3 | <0.01% | 2 | 2.00 | 2 | 16 | Bounded degree |
-| **Layer 5** | 1 | <0.01% | 0 | 0.00 | 0 | 16 | Entry candidate |
-| **Layer 6** | 1 | <0.01% | 0 | 0.00 | 0 | 16 | Global Entry Point |
+| **Layer 5** | 1 | <0.01% | 0* | 0.00 | 0 | 16 | Single entry candidate (degree 0: no peers at this level) |
+| **Layer 6** | 1 | <0.01% | 0* | 0.00 | 0 | 16 | Global Entry Point (degree 0: single top-level node) |
+
+*\*Note on higher layers with degree 0: When a top layer contains exactly 1 node ($n=1$), no peer nodes exist at that level to form edges (self-loops are prohibited). Search traversal immediately descends to populated lower layers.*
 
 > [!TIP]
 > **Topology Insights**:
 > - **Exponential Layer Decay**: Node count drops by an empirical factor of $\approx 1/16$ per layer ($100{,}000 \to 6{,}188 \to 387 \to 26 \to 3 \to 1 \to 1$), adhering closely to the theoretical level multiplier $m_L = 1/\ln(M)$.
 > - **Degree Invariant Enforcement**: All layers strictly respect their degree capping ($M_0=32$ for Layer 0, $M=16$ for higher layers).
-> - **Throughput Decay Profile**: Insertion throughput gradually decays from ~1,985 vec/s down to ~823 vec/s as graph depth expands from 2 to 6 layers, requiring deeper beam search traversal ($efConstruction=200$) on insertion.
+> - **Zero Isolated Nodes at Layer 0**: Safe symmetric pruning preserves Layer 0 bidirectional connectivity, guaranteeing every node maintains degree $\ge 1$.
+> - **Throughput Decay Profile**: Insertion throughput gradually decays from ~2,035 vec/s down to ~849 vec/s as graph depth expands from 2 to 6 layers, requiring deeper beam search traversal ($efConstruction=200$) on insertion.
+
 
 ---
 

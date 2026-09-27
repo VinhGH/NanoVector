@@ -148,4 +148,18 @@ class HnswGraphInvariantTest {
         .isEqualTo(totalDirectedEdges);
     assertThat(symmetryRatio).isEqualTo(1.0);
   }
+
+  @Test
+  @DisplayName(
+      "Invariant 6: Zero isolated nodes at Layer 0 - every node has degree >= 1 at Layer 0")
+  void testNoIsolatedNodesAtLayer0() {
+    HnswIndex index = buildIndex(SEED, 500);
+    HnswGraph graph = index.graph();
+
+    for (int i = 0; i < graph.size(); i++) {
+      assertThat(graph.getNode(i).degree(0))
+          .as("Node %d must have at least one connection at Layer 0", i)
+          .isGreaterThanOrEqualTo(1);
+    }
+  }
 }

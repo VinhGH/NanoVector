@@ -305,6 +305,29 @@ public final class HnswGraph {
     for (int id : pruned) {
       kept[id] = true;
     }
+
+    // Invariant protection for Layer 0: prevent creating isolated nodes (degree == 0).
+    // If a discarded neighbor would be left with degree <= 1 (meaning this was its only edge),
+    // retain it and swap out a candidate in pruned that has degree > 1.
+    if (layer == 0) {
+      for (int oldNeighborId : currentNeighbors) {
+        if (!kept[oldNeighborId]) {
+          HnswNode oldNode = getNode(oldNeighborId);
+          if (oldNode.degree(0) <= 1) {
+            for (int i = pruned.length - 1; i >= 0; i--) {
+              int candId = pruned[i];
+              if (candId != oldNeighborId && getNode(candId).degree(0) > 1) {
+                kept[candId] = false;
+                kept[oldNeighborId] = true;
+                pruned[i] = oldNeighborId;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
     for (int oldNeighborId : currentNeighbors) {
       if (!kept[oldNeighborId]) {
         getNode(oldNeighborId).removeNeighbor(layer, nodeId);
