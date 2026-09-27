@@ -118,12 +118,13 @@ public class ScaleConstructionBenchmark {
       double meanLatencyUsPerVec,
       int maxLevel,
       int isolatedNodesLayer0,
+      int connectedComponentsLayer0,
       long totalEdgesAllLayers,
       List<LayerStats> layerStats) {
 
     public String toSummaryMarkdownRow() {
       return String.format(
-          "| %7d | %13.2f | %15d | %22.1f | %16.2f | %9d | %11d | %11d |",
+          "| %7d | %13.2f | %15d | %22.1f | %16.2f | %9d | %11d | %14d | %11d |",
           vectorCount,
           rawPayloadMiB,
           buildTimeMs,
@@ -131,6 +132,7 @@ public class ScaleConstructionBenchmark {
           meanLatencyUsPerVec,
           maxLevel,
           isolatedNodesLayer0,
+          connectedComponentsLayer0,
           totalEdgesAllLayers);
     }
   }
@@ -213,6 +215,31 @@ public class ScaleConstructionBenchmark {
       }
     }
 
+    // Connected components on Layer 0 via BFS
+    int connectedComponentsLayer0 = 0;
+    if (count > 0) {
+      boolean[] visited = new boolean[count];
+      for (int i = 0; i < count; i++) {
+        if (!visited[i]) {
+          connectedComponentsLayer0++;
+          int[] queue = new int[count];
+          int head = 0;
+          int tail = 0;
+          queue[tail++] = i;
+          visited[i] = true;
+          while (head < tail) {
+            int curr = queue[head++];
+            for (int neighbor : graph.getNode(curr).getNeighbors(0)) {
+              if (!visited[neighbor]) {
+                visited[neighbor] = true;
+                queue[tail++] = neighbor;
+              }
+            }
+          }
+        }
+      }
+    }
+
     return new ConstructionReport(
         count,
         dim,
@@ -222,6 +249,7 @@ public class ScaleConstructionBenchmark {
         meanLatencyUs,
         maxLevel,
         isolatedNodesLayer0,
+        connectedComponentsLayer0,
         totalEdges,
         layerStatsList);
   }
@@ -234,15 +262,15 @@ public class ScaleConstructionBenchmark {
    */
   public static void runConstructionSweep(int[] scales) {
     System.out.println(
-        "=================================================================================================================");
+        "=============================================================================================================================");
     System.out.println(
-        "                         NANOVECTOR HNSW GRAPH CONSTRUCTION & TOPOLOGY SWEEP                                     ");
+        "                         NANOVECTOR HNSW GRAPH CONSTRUCTION & TOPOLOGY SWEEP                                                 ");
     System.out.println(
-        "=================================================================================================================");
+        "=============================================================================================================================");
     System.out.println(
-        "| Scale N | Raw Size (MB) | Build Time (ms) | Throughput (vec/s) | Latency (us/vec) | Max Level | Isolated L0 | Total Edges |");
+        "| Scale N | Raw Size (MB) | Build Time (ms) | Throughput (vec/s) | Latency (us/vec) | Max Level | Isolated L0 | Components L0 | Total Edges |");
     System.out.println(
-        "|:--------|--------------:|----------------:|-------------------:|-----------------:|----------:|------------:|------------:|");
+        "|:--------|--------------:|----------------:|-------------------:|-----------------:|----------:|------------:|--------------:|------------:|");
 
     List<ConstructionReport> reports = new ArrayList<>();
     for (int n : scales) {

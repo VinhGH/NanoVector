@@ -38,6 +38,7 @@ class ScaleConstructionBenchmarkTest {
     assertThat(report.meanLatencyUsPerVec()).isGreaterThan(0.0);
     assertThat(report.maxLevel()).isGreaterThanOrEqualTo(0);
     assertThat(report.isolatedNodesLayer0()).isEqualTo(0);
+    assertThat(report.connectedComponentsLayer0()).isEqualTo(1);
     assertThat(report.totalEdgesAllLayers()).isGreaterThan(0L);
 
     assertThat(report.layerStats()).isNotEmpty();
