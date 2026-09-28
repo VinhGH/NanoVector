@@ -148,6 +148,45 @@ public final class MemoryFootprintProfiler {
         heapDelta);
   }
 
+  /** Profiles memory footprint for QuantizedFlatIndex (SQ8) at the given scale. */
+  public static MemoryReport profileQuantizedFlat(int vectorCount, int dimension) {
+    long rawPayload = (long) vectorCount * dimension * Float.BYTES;
+    long externalIdPayload = (long) vectorCount * Long.BYTES;
+
+    Random rng = new Random(42L);
+    float[][] dataset = generateDataset(vectorCount, dimension, rng);
+
+    // Measure empirical heap delta
+    com.nanovector.core.index.QuantizedFlatIndex[] holder =
+        new com.nanovector.core.index.QuantizedFlatIndex[1];
+    long heapDelta =
+        measureHeapDelta(
+            () -> {
+              com.nanovector.core.index.QuantizedFlatIndex index =
+                  new com.nanovector.core.index.QuantizedFlatIndex(dimension, vectorCount, true);
+              for (int i = 0; i < vectorCount; i++) {
+                index.insert(i, dataset[i]);
+              }
+              holder[0] = index;
+            });
+
+    com.nanovector.core.index.QuantizedFlatIndex index = holder[0];
+    long storageStructural =
+        estimateQuantizedStorageStructural(index.storage(), vectorCount, dimension);
+    long totalStructural = storageStructural + OBJECT_HEADER_BYTES + (2 * REF_BYTES);
+
+    return createReport(
+        "QuantizedFlatIndex",
+        vectorCount,
+        dimension,
+        rawPayload,
+        externalIdPayload,
+        storageStructural,
+        0L,
+        totalStructural,
+        heapDelta);
+  }
+
   /** Profiles memory footprint for HnswIndex at the given scale. */
   public static MemoryReport profileHnsw(int vectorCount, int dimension, HnswConfig config) {
     long rawPayload = (long) vectorCount * dimension * Float.BYTES;
@@ -212,6 +251,42 @@ public final class MemoryFootprintProfiler {
     long storageObjBytes = OBJECT_HEADER_BYTES + (3 * REF_BYTES) + (2 * Integer.BYTES);
 
     return align8(storageObjBytes + vectorArrayBytes + externalIdArrayBytes + totalMap);
+  }
+
+  /** Computes the structural memory estimate of QuantizedVectorStorage. */
+  public static long estimateQuantizedStorageStructural(
+      com.nanovector.core.quantization.QuantizedVectorStorage storage, int count, int dimension) {
+    int capacity = Math.max(count, storage.vectorBuffer().length / dimension);
+
+    // 1. Primitive byte buffer: byte[capacity * dimension]
+    long vectorArrayBytes = ARRAY_HEADER_BYTES + align8((long) capacity * dimension * Byte.BYTES);
+
+    // 2. Parallel primitive float buffers for per-vector parameters: mins and scales
+    long minsArrayBytes = ARRAY_HEADER_BYTES + align8((long) capacity * Float.BYTES);
+    long scalesArrayBytes = ARRAY_HEADER_BYTES + align8((long) capacity * Float.BYTES);
+
+    // 3. Primitive long external IDs: long[capacity]
+    long externalIdArrayBytes = ARRAY_HEADER_BYTES + align8((long) capacity * Long.BYTES);
+
+    // 4. HashMap<Long, Integer> externalToInternal:
+    int tableCapacity = Integer.highestOneBit(Math.max(16, (int) (count / 0.75f))) << 1;
+    long tableArrayBytes = ARRAY_HEADER_BYTES + align8((long) tableCapacity * REF_BYTES);
+    long mapEntriesBytes = (long) count * HASHMAP_ENTRY_TOTAL;
+    long mapObjectBytes = OBJECT_HEADER_BYTES + (4 * REF_BYTES) + 8; // fields
+
+    long totalMap = mapObjectBytes + tableArrayBytes + mapEntriesBytes;
+
+    // QuantizedVectorStorage object itself: header + 5 refs (quantizer, vectors, mins, scales,
+    // externalIds, map) + 2 ints (dimension, size)
+    long storageObjBytes = OBJECT_HEADER_BYTES + (6 * REF_BYTES) + (2 * Integer.BYTES);
+
+    return align8(
+        storageObjBytes
+            + vectorArrayBytes
+            + minsArrayBytes
+            + scalesArrayBytes
+            + externalIdArrayBytes
+            + totalMap);
   }
 
   /** Computes the structural memory estimate of HnswGraph (nodes and neighbor adjacency lists). */

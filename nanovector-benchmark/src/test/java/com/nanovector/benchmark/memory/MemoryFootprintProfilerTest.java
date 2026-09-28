@@ -66,4 +66,35 @@ class MemoryFootprintProfilerTest {
         .contains("Graph Overhead / Vector")
         .contains("Structural Amplification");
   }
+
+  @Test
+  @DisplayName("Verify QuantizedFlatIndex memory characterization and structural reduction")
+  void testProfileQuantizedFlat() {
+    int count = 200;
+    int dim = 128;
+
+    MemoryFootprintProfiler.MemoryReport flatReport =
+        MemoryFootprintProfiler.profileFlat(count, dim);
+    MemoryFootprintProfiler.MemoryReport sq8Report =
+        MemoryFootprintProfiler.profileQuantizedFlat(count, dim);
+
+    assertThat(sq8Report.indexType()).isEqualTo("QuantizedFlatIndex");
+    assertThat(sq8Report.vectorCount()).isEqualTo(count);
+    assertThat(sq8Report.dimension()).isEqualTo(dim);
+
+    // Structural storage for SQ8 must be significantly smaller than FP32 Flat
+    assertThat(sq8Report.storageStructuralBytes()).isLessThan(flatReport.storageStructuralBytes());
+    assertThat(sq8Report.totalStructuralBytes()).isLessThan(flatReport.totalStructuralBytes());
+
+    // Vector coordinate structural storage per vector should be ~136 bytes for D=128
+    double structuralRatio =
+        (double) flatReport.storageStructuralBytes() / sq8Report.storageStructuralBytes();
+    assertThat(structuralRatio).isGreaterThan(2.0);
+
+    String formatted = sq8Report.toFormattedString();
+    assertThat(formatted)
+        .contains("QuantizedFlatIndex")
+        .contains("Raw Vector Payload")
+        .contains("Storage Structural Estimate");
+  }
 }
