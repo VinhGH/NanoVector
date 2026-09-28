@@ -445,22 +445,23 @@ Empirical construction performance and graph topology properties across scales (
 Phase 6B investigates the fundamental systems question:
 > **"Can we reduce vector-storage memory by approximately 4× while preserving acceptable Recall@10 and obtaining useful distance-computation performance?"**
 
-To isolate quantization distortion from graph-routing heuristics, Phase 6B **strictly excludes HNSW**, benchmarking the quantized flat index (`QuantizedFlatIndex`) directly against the exact FP32 ground truth oracle (`FlatIndex`) across $N \in \{1\text{K}, 10\text{K}, 50\text{K}, 100\text{K}\}$ at dimension $D=128$ under `EUCLIDEAN` distance ($k=10$, 128 queries, seeds: 42L data, 12345L query).
+To isolate quantization distortion from graph-routing heuristics, Phase 6B **strictly excludes HNSW**, benchmarking the quantized flat index (`QuantizedFlatIndex`) directly against the exact FP32 ground truth oracle (`FlatIndex`) across $N \in \{1\text{K}, 10\text{K}, 50\text{K}, 100\text{K}\}$ at dimension $D=128$ under `EUCLIDEAN` distance ($k=10$, 128 queries, seeds: 42L data, 12345L query). Within this brute-force FlatIndex comparison, the observed Recall difference isolates the ranking impact of SQ8 distance approximation, without HNSW routing effects.
 
 ### 1. Mathematical Representation & Contiguous Storage
 
 - **Granularity & Mapping**: Per-vector asymmetric affine quantization mapping continuous $v_j \in [v_{\min}, v_{\max}]$ to unsigned 8-bit integers $[0, 255]$:
   $$\text{scale} = \frac{v_{\max} - v_{\min}}{255.0f}, \quad q_j = \text{clamp}\left( \text{round}\left( \frac{v_j - v_{\min}}{\text{scale}} \right), 0, 255 \right)$$
+  *(degenerate zero-range where $v_{\max} == v_{\min}$ sets $\text{scale} = 0.0f$, $q_j = 0$, reconstructing $v_{\min}$ exactly)*
 - **Storage Representation**: Unsigned 8-bit values stored in Java primitive `byte[]` buffers (`(byte) (q & 0xFF)`), retrieved via `raw & 0xFF`.
 - **Per-Vector Metadata**: `float min` (4 bytes) + `float scale` (4 bytes) = 8 bytes metadata per vector.
 - **Payload at $D=128$**: $128 \times 1\text{ B} + 8\text{ B} = 136\text{ bytes}$ per vector, yielding a **$3.76\times$ vector storage compression** compared to FP32 ($128 \times 4 = 512\text{ bytes}$).
-- **Contiguous Primitive Storage**: `QuantizedVectorStorage` maintains flat buffers (`byte[] quantizedBuffer`, `float[] minBuffer`, `float[] scaleBuffer`, `long[] externalIds`), eliminating object headers and ensuring allocation-free distance evaluation.
+- **Contiguous Primitive Storage**: `QuantizedVectorStorage` maintains flat primitive buffers (`byte[] quantizedBuffer`, `float[] minBuffer`, `float[] scaleBuffer`, `long[] externalIds`), ensuring distance evaluation avoids intermediate vector-array allocations.
 
 ### 2. Asymmetric Distance Computation (ADC) & Vector API SIMD
 
 - **Asymmetric Distance Computation (ADC)**: The query vector $q$ remains in exact FP32 single-precision to avoid double quantization distortion:
   $$L_2^2(q, \hat{v}) = \sum_{j=0}^{D-1} \left( q_j - (v_{\min} + \text{unsigned}(p_j) \times \text{scale}) \right)^2$$
-- **SIMD Acceleration (`jdk.incubator.vector`)**: `VectorQuantizedEuclideanDistance` uses 8-lane 256-bit AVX2 vectors (`FloatVector.SPECIES_PREFERRED`), loading 8 bytes, widening unsigned bytes to integers, casting to `FloatVector`, reconstructing floats via FMA ($\text{laneMin} + v_{\text{float}} \times \text{laneScale}$), and accumulating squared differences using FMA instructions, with a scalar tail loop for dimension alignment.
+- **SIMD Acceleration (`jdk.incubator.vector`)**: `VectorQuantizedEuclideanDistance` uses `FloatVector.SPECIES_PREFERRED` (measured as 8 float lanes on the benchmark machine's AVX2 configuration), loading 8 bytes, widening unsigned bytes to integers, casting to `FloatVector`, reconstructing floats via FMA ($\text{laneMin} + v_{\text{float}} \times \text{laneScale}$), and accumulating squared differences using FMA instructions, with a scalar tail loop for dimension alignment.
 
 ### 3. Empirical Recall@10 Trade-Off ($D=128, k=10$)
 
@@ -475,7 +476,7 @@ Measured against the exact FP32 `FlatIndex` reference oracle across scales:
 
 > [!NOTE]
 > **Recall Observations**:
-> - **Tight Accuracy Retention**: Empirical Recall@10 remains strictly bounded between **98.91%** and **99.45%**, with peak recall loss never exceeding **1.09%**.
+> - **Ranking Impact**: Under this benchmark configuration, SQ8 quantization produced limited Top-10 ranking disruption, with empirical Recall@10 remaining strictly bounded between **98.91%** and **99.45%** (peak recall loss $\le 1.09\%$).
 > - **Non-Monotonic Recall Behavior**: Recall loss does not degrade monotonically with $N$ ($0.55\% \to 1.09\% \to 1.09\% \to 0.70\%$), reflecting local neighborhood density variations rather than cumulative distortion.
 > - **Algorithmic Parity**: Scalar ADC and SIMD ADC produce **100.00% mutual top-$k$ agreement** across all tested queries and scales, proving that vectorized arithmetic widening and FMA accumulation preserve exact ranking order.
 
@@ -492,7 +493,7 @@ Measured via `MemoryFootprintProfiler` (structural HotSpot 64-bit model vs empir
 
 - **Tier 1 (Vector Storage Payload)**: Achieves **$3.76\times$ reduction** ($512\text{ B} \to 136\text{ B}$ per vector, accounting for the 8-byte $min/scale$ metadata).
 - **Tier 2 (Total Structural Index)**: Achieves **$2.66\times - 2.69\times$ reduction** ($57.46\text{ MiB} \to 21.60\text{ MiB}$ at 100K), constrained by the fixed auxiliary cost of `long[] externalIds` (8 B/vec) and `HashMap<Long, Integer>` (~82.5 B/vec).
-- **Tier 3 (Measured JVM Heap Delta)**: Achieves **$2.36\times - 2.44\times$ reduction** in observed retained heap ($59.59\text{ MiB} \to 24.38\text{ MiB}$ at 100K), demonstrating that physical heap savings closely match structural projections.
+- **Tier 3 (Measured JVM Heap Delta)**: Achieves **$2.36\times - 2.44\times$ reduction** in observed runtime heap delta ($59.59\text{ MiB} \to 24.38\text{ MiB}$ at 100K) under the benchmark methodology, reflecting JVM object/array overheads and allocator/GC behavior (an empirical runtime observation, not an exact retained-object footprint).
 
 ### 5. Search Latency Distribution & Throughput Dynamics
 
@@ -527,7 +528,7 @@ Measured on `FlatVsQuantizedFlatBenchmark` ($D=128, k=10$, 128 queries):
    - As $N$ increases ($10\text{K} \to 100\text{K}$), SQ8 SIMD consistently outperforms FP32 SIMD (**$1.42\times - 1.76\times$ speedup**).
    - This behavior is consistent with reduced memory traffic becoming increasingly valuable at larger working-set sizes, but cache residency and DRAM bandwidth were not directly measured via hardware performance counters.
 3. **Synthesis Verdict**:
-   > *"Under the tested configuration, asymmetric per-vector SQ8 substantially reduces vector-storage ($3.76\times$) and measured heap usage ($2.36\times - 2.44\times$) while maintaining high Recall@10 ($>98.9\%$, maximum recall loss $\le 1.09\%$). Its performance benefit depends on the execution path and dataset scale: scalar ADC does not consistently outperform FP32, whereas SIMD ADC becomes advantageous at larger scales ($1.42\times - 1.76\times$)."*
+   > *"Under the tested configuration, asymmetric per-vector SQ8 substantially reduces vector-storage ($3.76\times$) and measured heap usage ($2.36\times - 2.44\times$) while maintaining high measured Recall@10 ($98.91\% - 99.45\%$, maximum recall loss $\le 1.09\%$). Its performance benefit depends on the execution path and dataset scale: scalar ADC does not consistently outperform FP32, whereas SIMD ADC becomes advantageous at larger scales ($1.42\times - 1.76\times$)."*
 
 ---
 
