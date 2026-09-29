@@ -82,9 +82,9 @@ class QuantizedEuclideanDistanceTest {
     float adcScalar = scalarDist.distance(qv, query);
     float adcSimd = simdDist.distance(qv, query);
 
-    // ADC on-the-fly reconstruction must match explicit dequantization
-    assertThat(adcScalar).isCloseTo(exactDist, within(1e-4f));
-    assertThat(adcSimd).isCloseTo(exactDist, within(1e-4f));
+    // ADC on-the-fly reconstruction must match explicit dequantization within float precision
+    assertFloatClose(adcScalar, exactDist, "Scalar ADC matches explicit dequantization");
+    assertFloatClose(adcSimd, exactDist, "SIMD ADC matches explicit dequantization");
   }
 
   @ParameterizedTest
