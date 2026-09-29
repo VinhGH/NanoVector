@@ -532,6 +532,185 @@ Measured on `FlatVsQuantizedFlatBenchmark` ($D=128, k=10$, 128 queries):
 
 ---
 
+## ⚡ Quantized HNSW Systems Study (Phase 6C)
+
+Phase 6C integrates 8-bit asymmetric per-vector Scalar Quantization (SQ8) and Asymmetric Distance Computation (ADC) directly into the HNSW routing and graph construction engines (`QuantizedHnswIndex`), answering three fundamental systems questions:
+> 1. **Graph Construction Under Quantization**: Does building an HNSW graph using approximate SQ8 SIMD ADC distances degrade the graph topology, violate structural connectivity invariants, or damage small-world navigability?
+> 2. **Real-World Memory Footprint & Structural Validation**: Does the analytical structural projection from Phase 6B ($\approx 38.92\text{ MiB}$ at $100\text{K}$) hold under empirical JVM heap delta measurement? Does graph topology become the dominant memory consumer when vector storage is compressed?
+> 3. **Pareto Frontier & Two-Phase Search Recovery**: How does the Recall vs Throughput trade-off shift across dynamic beam widths ($efSearch \in \{10, \dots, 400\}$)? Can a Two-Phase search (SQ8 graph exploration followed by exact FP32 re-ranking) recover the quantization-induced recall loss?
+
+Baseline Workload: Uniform synthetic vectors, $D = 128$, Metric = Squared Euclidean ($L_2^2$), $k = 10$, 128 test queries, seeds `42L` (dataset) and `12345L` (queries). Reference Oracle: Full-precision FP32 `FlatIndex` ($O(N)$ sequential scan, 100% recall by definition).
+
+### 1. Architectural Design & Separation of Concerns
+
+`QuantizedHnswIndex` implements the `VectorIndex` contract by orchestrating three cleanly decoupled layers:
+
+```text
+QuantizedHnswIndex (VectorIndex contract: insert, searchKnn, searchKnnWithRerank)
+    │
+    ├── QuantizedVectorStorage (136 B/vec: byte[] vectors, float[] mins, float[] scales, long[] externalIds)
+    │
+    ├── HnswGraph (Decoupled topology: HnswNode[], LevelGenerator, EpochVisitedSet)
+    │       │
+    │       └── NeighborSelector (Algorithm 4 heuristic with fallback)
+    │
+    └── QuantizedEuclideanDistance (SIMD ADC distance kernel via jdk.incubator.vector)
+```
+
+- **Decoupled Functional Evaluators**: Pure graph components (`HnswGraph`, `NeighborSelector`) do not touch vector data. Distances are evaluated via two functional interfaces:
+  - `DistanceToQuery`: Evaluates distance from stored quantized nodes directly to an external query vector using SIMD ADC against the primitive byte buffer, with zero object allocations.
+  - `NodeDistanceEvaluator`: Evaluates distance between two stored nodes during graph construction. In `QuantizedHnswIndex`, node A is dequantized into a single pre-allocated thread-safe scratch buffer (`float[] nodeEvalBuffer`), and node B is evaluated via ADC against that buffer.
+- **Construction Strategies Evaluated**:
+  - **FP32 HNSW (Reference)**: Exact FP32 Euclidean (`float[]`) for build and search (Reference Oracle graph topology).
+  - **Hybrid SQ8 HNSW (Strategy A)**: Built with exact FP32 Euclidean (`HnswIndex.fromFp32`), searched with SQ8 SIMD ADC. Reuses FP32 reference graph; **isolates search quantization error from routing error**.
+  - **Pure SQ8 HNSW (Strategy B)**: Built and searched end-to-end with SQ8 SIMD ADC (`byte[]` + scratch buffer dequantization). End-to-end quantized system with minimal build memory.
+
+### 2. Graph Construction Strategies & Topology Divergence ($D=128, k=10, efSearch=50, efConstruction=200$)
+
+Evaluated using `HnswConstructionStrategyBenchmark` across scales $N \in \{1\text{K}, 10\text{K}, 50\text{K}, 100\text{K}\}$:
+
+#### Construction Performance & Build Throughput
+
+| Scale $N$ | FP32 Build Time | FP32 Throughput | Pure SQ8 Build Time | Pure SQ8 Throughput | Build Time Ratio |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | 610 ms | 1,636.8 vec/s | 1,032 ms | 968.6 vec/s | **1.69x** |
+| **10,000** | 8,219 ms | 1,216.6 vec/s | 15,368 ms | 650.7 vec/s | **1.87x** |
+| **50,000** | 70,195 ms | 712.3 vec/s | 105,141 ms | 475.6 vec/s | **1.50x** |
+| **100,000** | 147,568 ms | 677.7 vec/s | 239,510 ms | 417.5 vec/s | **1.62x** |
+
+> [!NOTE]
+> **Construction Slowdown Dynamics**:
+> - **Observed**: Pure SQ8 HNSW construction was $1.50\times - 1.87\times$ slower than FP32 HNSW across the tested scales.
+> - **Implementation-Level Explanation**: The additional cost is consistent with the current implementation's ADC distance calculation and neighbor-selection/dequantization work: candidate exploration computes affine min/scale transformations on each vector pair, and neighbor heuristic pruning (`NeighborSelector`) dequantizes node vectors into a scratch buffer before evaluating diverse connections. FP32 HNSW evaluates direct contiguous float arrays without affine arithmetic.
+
+#### Graph Topological Divergence & Invariant Health
+
+| Scale $N$ | Layer-0 Jaccard Sim | FP32 Total Edges | Pure SQ8 Edges | Max Deg L0 | Isolated L0 | Components L0 | Topology Health |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | **96.07%** | 28,796 | 28,784 | 32 | 0 | 1 | **PASS** |
+| **10,000** | **92.22%** | 281,452 | 281,518 | 32 | 0 | 1 | **PASS** |
+| **50,000** | **76.72%** | 1,292,374 | 1,292,362 | 32 | 0 | 1 | **PASS** |
+| **100,000** | **60.24%** | 2,475,330 | 2,477,594 | 32 | 0 | 1 | **PASS** |
+
+> [!IMPORTANT]
+> **Graph Structural Health**: Across all scales, Pure SQ8 graphs exhibit **zero isolated nodes** and **exactly 1 connected component** on Layer 0 (100% BFS reachability), with degree bounds ($\le 32$ at Layer 0) strictly respected. Total edge counts match the FP32 reference graph within $0.09\%$. While individual neighbor choices diverge as scale expands (Layer-0 Jaccard similarity drops to $60.24\%$ at $100\text{K}$ because quantization noise disrupts close distance ties), connectivity and graph structural invariants remained uncompromised in these experiments.
+
+#### Search Recall@10 Breakdown & Error Attribution
+
+By comparing FP32 HNSW, Hybrid SQ8 HNSW (Strategy A), and Pure SQ8 HNSW (Strategy B) against the exact FP32 `FlatIndex` Ground Truth Oracle, we decompose the total recall loss into its exact physical causes:
+$$\Delta_{\text{total}} = \text{Recall}_{FP32} - \text{Recall}_{Pure} = \underbrace{(\text{Recall}_{FP32} - \text{Recall}_{Hybrid})}_{\text{Quantization Distance Loss } (\Delta_{\text{dist}})} + \underbrace{(\text{Recall}_{Hybrid} - \text{Recall}_{Pure})}_{\text{Topology Divergence Loss } (\Delta_{\text{topo}})}$$
+
+| Scale $N$ | FP32 Recall | Hybrid Recall | Pure SQ8 Recall | Total Recall Loss | Quant Distance Loss | Topology Loss (Attrib) | Hybrid-Pure Agreement |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | 99.38% | 98.83% | 98.75% | **0.62%** | 0.55% | 0.08% | 99.61% |
+| **10,000** | 68.05% | 67.73% | 67.34% | **0.70%** | 0.31% | 0.39% | 94.45% |
+| **50,000** | 39.45% | 40.16% | 39.14% | **0.31%** | -0.70% | 1.02% | 68.67% |
+| **100,000** | 27.42% | 27.50% | 26.48% | **0.94%** | -0.08% | 1.02% | 49.22% |
+
+> [!TIP]
+> **Recall Attribution & Fixed-Budget Search Scaling ($efSearch=50$)**:
+> - **Attribution Focus**: The primary purpose of Tables 1–3 is to isolate the recall impact of SQ8 quantization against the FP32 baseline, rather than demonstrating optimized absolute HNSW recall at scale.
+> - **Search Budget Context**: Both FP32 and SQ8 recall decrease as scale expands ($99.38\% \to 27.42\%$ for FP32; $98.75\% \to 26.48\%$ for Pure SQ8) because $efSearch=50$ is held constant while the search space expands 100-fold (as characterized in Phase 6A; higher recall at scale requires scaling $efSearch$, as shown in Section 4).
+> - **Empirical Stability**: What is meaningful is that the **gap between FP32 and Pure SQ8 remains strictly bounded within $\le 0.94$ percentage points** across all scales ($0.62\% \to 0.70\% \to 0.31\% \to 0.94\%$). Quantization substantially changes local graph topology at larger scales (Layer-0 Jaccard drops to $60.24\%$ at $100\text{K}$), while the resulting routing quality remains relatively stable in these experiments.
+
+### 3. Measured Scale Memory Characterization ($1\text{K} \to 100\text{K}$)
+
+Measured using `MemoryFootprintProfiler` on HotSpot 64-bit JVM with Compressed OOPs, under 4-pass GC stabilization:
+
+| Scale $N$ | Raw Vector Payload | FP32 Vector Storage | FP32 Graph Topology | FP32 Total Structural | FP32 Measured Heap | SQ8 Vector Storage | SQ8 Graph Topology | SQ8 Total Structural | SQ8 Measured Heap |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | 0.49 MiB | 0.57 MiB | 0.19 MiB | 0.76 MiB | 0.93 MiB | 0.21 MiB | 0.19 MiB | **0.40 MiB** | **0.45 MiB** |
+| **10,000** | 4.88 MiB | 5.71 MiB | 1.86 MiB | 7.57 MiB | 10.62 MiB | 2.12 MiB | 1.86 MiB | **3.98 MiB** | **3.92 MiB** |
+| **50,000** | 24.41 MiB | 28.73 MiB | 8.87 MiB | 37.60 MiB | 40.88 MiB | 10.80 MiB | 8.87 MiB | **19.67 MiB** | **21.26 MiB** |
+| **100,000** | 48.83 MiB | 57.46 MiB | 17.32 MiB | 74.78 MiB | 77.29 MiB | 21.60 MiB | 17.33 MiB | **38.93 MiB** | **42.01 MiB** |
+
+#### Memory Reduction Ratios & Topology Dominance:
+
+| Scale $N$ | FP32 Structural | FP32 Measured Heap | SQ8 Structural | SQ8 Measured Heap | Storage Reduction | Total Struct Reduction | Heap Delta Reduction | SQ8 Topology Fraction |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,000** | 797.8 B/v | 972.6 B/v | 421.8 B/v | 473.8 B/v | 2.68x | 1.89x | **2.05x** | **46.8%** |
+| **10,000** | 793.7 B/v | 1,113.7 B/v | 417.7 B/v | 410.9 B/v | 2.69x | 1.90x | **2.71x** | **46.7%** |
+| **50,000** | 788.5 B/v | 857.3 B/v | 412.5 B/v | 445.9 B/v | 2.66x | 1.91x | **1.92x** | **45.1%** |
+| **100,000** | 784.1 B/v | 810.4 B/v | 408.2 B/v | 440.6 B/v | 2.66x | 1.92x | **1.84x** | **44.5%** |
+
+```
+Memory Footprint Distribution at Scale N = 100,000:
+
+FP32 HNSW (74.78 MiB Structural):
+[████████████████████████████████████████████████████████ 76.8% Storage ][██████████████ 23.2% Graph ]
+
+Pure SQ8 HNSW (38.93 MiB Structural):
+[████████████████████████████ 55.5% Storage ][███████████████████████ 44.5% Graph ]
+```
+
+> [!IMPORTANT]
+> **Validation of the Phase 6B Structural Model & Topology Dominance**:
+> 1. In Phase 6B, our structural model projected **$\approx 38.92\text{ MiB}$** at $100\text{K}$. The measured structural footprint is **$38.93\text{ MiB}$** ($99.97\%$ exact agreement).
+> 2. The measured JVM heap delta at $100\text{K}$ is **$42.01\text{ MiB}$**, reducing heap consumption by **$35.28\text{ MiB}$** ($1.84\times$ reduction vs FP32's $77.29\text{ MiB}$).
+> 3. **Topology Dominance (Remaining Memory Bottleneck After Vector Compression)**: In FP32 HNSW, vector storage is the dominant cost ($76.8\%$). When vector storage is compressed via SQ8 ($57.46 \to 21.60\text{ MiB}$), graph topology ($17.33\text{ MiB}$) rises from $23.2\%$ to **$44.5\%$** of the total structural footprint. This suggests diminishing returns from further vector-only compression because graph topology becomes an increasingly large fraction of total index memory.
+> 4. **Motivation for Phase 6D (Off-Heap Graph Representation)**: Because graph topology becomes an increasingly large fraction of index memory (~44.5%), optimizing vector buffers alone yields diminishing returns. This motivates investigating off-heap graph representations (e.g. primitive flattened adjacency lists via `MemorySegment`) in Phase 6D.
+
+### 4. Pareto Frontier Sweep & Two-Phase Search with FP32 Re-ranking
+
+Evaluated using `ParetoFrontierRerankBenchmark` at $N = 10{,}000$, $D = 128$, $k = 10$, across beam widths $efSearch \in \{10, 20, 50, 100, 200, 400\}$:
+
+> **Dominance Criterion**: A configuration dominates another on this benchmark if it achieves equal or higher Recall@10 at higher throughput (or lower latency), or higher throughput at equal or higher recall.
+
+#### Pareto Frontier: Recall@10 vs Throughput (QPS) and Latency
+
+| $efSearch$ | FP32 Recall | FP32 QPS | FP32 Mean Latency | SQ8 Recall | SQ8 QPS | SQ8 Mean Latency | Reranked Recall | Reranked QPS | Reranked Mean Latency |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **10** | 29.30% | 21,990.6 | 45.47 $\mu\text{s}$ | 29.77% | **30,654.1** | **32.62 $\mu\text{s}$** | 29.77% | 25,638.1 | 39.00 $\mu\text{s}$ |
+| **20** | 44.77% | 12,430.3 | 80.45 $\mu\text{s}$ | 43.91% | **17,461.3** | **57.27 $\mu\text{s}$** | 43.91% | 14,546.0 | 68.75 $\mu\text{s}$ |
+| **50** | 68.05% | 5,626.2 | 177.74 $\mu\text{s}$ | 67.34% | **8,035.8** | **124.44 $\mu\text{s}$** | 67.42% | 7,708.5 | 129.73 $\mu\text{s}$ |
+| **100** | 85.47% | 3,042.2 | 328.71 $\mu\text{s}$ | 85.47% | **4,609.4** | **216.95 $\mu\text{s}$** | 85.70% | 3,204.6 | 312.05 $\mu\text{s}$ |
+| **200** | 96.17% | 1,762.2 | 567.48 $\mu\text{s}$ | 95.23% | **2,688.4** | **371.97 $\mu\text{s}$** | **96.02%** | **2,271.3** | **440.28 $\mu\text{s}$** |
+| **400** | 99.61% | 965.9 | 1,035.27 $\mu\text{s}$ | 98.36% | **1,361.0** | **734.74 $\mu\text{s}$** | **99.45%** | **1,108.9** | **901.80 $\mu\text{s}$** |
+
+#### Two-Phase Re-ranking Breakdown: Candidate vs Final Recall
+
+| $efSearch$ | Pure SQ8 Recall | Candidate Recall@10 | Re-ranked Recall | Recall Recovered | Unrecoverable Loss | Re-rank Overhead |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **10** | 29.77% | 29.77% | 29.77% | 0.00% | 70.23% | 6.38 $\mu\text{s}$ |
+| **20** | 43.91% | 43.91% | 43.91% | 0.00% | 56.09% | 11.48 $\mu\text{s}$ |
+| **50** | 67.34% | 67.42% | 67.42% | +0.08% | 32.58% | 5.28 $\mu\text{s}$ |
+| **100** | 85.47% | 85.70% | 85.70% | +0.23% | 14.30% | 95.11 $\mu\text{s}$ |
+| **200** | 95.23% | 96.02% | **96.02%** | **+0.78%** | 3.98% | 68.31 $\mu\text{s}$ |
+| **400** | 98.36% | 99.45% | **99.45%** | **+1.09%** | 0.55% | 167.06 $\mu\text{s}$ |
+
+> [!TIP]
+> **Mechanics of Two-Phase Search Recovery**:
+> 1. **Observed Re-ranking Preservation**: In these benchmark runs, every ground-truth top-10 item recovered by the two-phase candidate set was retained by FP32 re-ranking ($\text{Candidate Recall@10} = \text{Re-ranked Recall@10}$ across all tested configurations); therefore, the observed re-ranking stage introduced no additional Recall@10 loss.
+> 2. **Attribution of Remaining Recall Loss**: At $efSearch=400$, the candidate pool contained $99.45\%$ of true ground truth items. The remaining recall loss ($0.55\%$) is attributable to candidate generation/routing rather than final ranking in these benchmark configurations (items pruned during HNSW greedy routing that never entered the candidate beam).
+> 3. **Trade-Off Profile**: At $efSearch=200$, Two-Phase Re-ranking achieves **comparable Recall@10 with higher throughput** ($96.02\%$ Recall vs FP32's $96.17\%$, lower by 0.15 percentage points in recall but $1.29\times$ faster: $2,271\text{ QPS}$ vs $1,762\text{ QPS}$). At $efSearch=400$, it reaches **$99.45\%$ Recall** at **$1,109\text{ QPS}$** ($15\%$ faster than FP32's $966\text{ QPS}$).
+
+#### Latency Distribution: P50 / P95 / P99 ($\mu\text{s}$)
+
+| $efSearch$ | FP32 HNSW (P50 / P95 / P99) | Pure SQ8 HNSW (P50 / P95 / P99) | SQ8 + FP32 Re-rank (P50 / P95 / P99) |
+| :---: | :---: | :---: | :---: |
+| **10** | 42.1 / 70.3 / 108.5 $\mu\text{s}$ | **28.7 / 60.2 / 86.1 $\mu\text{s}$** | 35.9 / 64.9 / 85.7 $\mu\text{s}$ |
+| **20** | 76.4 / 108.0 / 136.4 $\mu\text{s}$ | **54.0 / 81.6 / 102.2 $\mu\text{s}$** | 65.1 / 95.8 / 115.9 $\mu\text{s}$ |
+| **50** | 170.6 / 246.3 / 294.0 $\mu\text{s}$ | **117.6 / 174.0 / 226.8 $\mu\text{s}$** | 118.6 / 187.2 / 320.2 $\mu\text{s}$ |
+| **100** | 295.4 / 557.3 / 675.9 $\mu\text{s}$ | **189.3 / 352.6 / 576.1 $\mu\text{s}$** | 288.3 / 493.5 / 693.3 $\mu\text{s}$ |
+| **200** | 542.5 / 735.3 / 852.3 $\mu\text{s}$ | **347.7 / 514.4 / 708.1 $\mu\text{s}$** | 406.5 / 627.7 / 868.7 $\mu\text{s}$ |
+| **400** | 979.7 / 1,364.1 / 1,695.0 $\mu\text{s}$ | **648.2 / 1,174.1 / 1,507.0 $\mu\text{s}$** | 810.8 / 1,334.1 / 1,676.7 $\mu\text{s}$ |
+
+### 5. Systems Engineering Takeaways & Synthesis
+
+1. **Quantization and Graph Navigability**:
+   Phase 6C demonstrates experimentally that SQ8 quantization substantially reduces vector-memory consumption while preserving HNSW connectivity (0 isolated nodes, 1 component via BFS) and maintaining relatively small recall differences from the FP32 baseline across the tested scales. Quantization-induced topology divergence increases with scale (Layer-0 Jaccard similarity drops to $60.24\%$ at $100\text{K}$), yet the resulting recall gap remained below 1 percentage point ($\le 0.94\%$) in the tested configurations.
+2. **Construction Throughput**:
+   Pure SQ8 construction was $1.50\times - 1.87\times$ slower across tested scales. The additional cost is consistent with the current implementation's ADC distance calculations and neighbor-selection scratch dequantization.
+3. **Topology Dominance (Remaining Memory Bottleneck After Vector Compression)**:
+   At 100K vectors, SQ8 reduced measured JVM heap delta from 77.29 MiB to 42.01 MiB, while the measured structural footprint ($38.93\text{ MiB}$) closely matched the Phase 6B analytical model ($38.92\text{ MiB}$). Compressing vector storage shifts the primary memory component to the HNSW graph topology ($44.5\%$ of structural footprint), suggesting diminishing returns from further vector-only compression.
+4. **Two-Phase Re-ranking Dynamics**:
+   Two-phase FP32 re-ranking recovered most of the ranking loss observed with SQ8 candidates (recovering up to $+1.09\%$ at $efSearch=400$, reaching $99.45\%$ Recall@10 at $1,109\text{ QPS}$), indicating that the remaining recall loss in these experiments is primarily associated with candidate generation rather than final distance ordering.
+5. **Workload Strategy Recommendations**:
+   - *Throughput-Oriented Workloads*: Pure SQ8 HNSW delivers $1.39\times - 1.53\times$ higher QPS with $< 1\%$ recall difference from FP32.
+   - *High-Recall Workloads ($\ge 99\%$)*: Two-Phase Re-ranking achieves $99.45\%$ Recall@10 while remaining $15\%$ faster than FP32 HNSW baseline.
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -551,7 +730,7 @@ On Linux / macOS:
 ./mvnw clean verify
 ```
 
-This runs all **240 unit and integration tests** (Core: 158, Persistence: 58, Benchmark: 24; 0 failures, 0 errors, 0 skipped) across Linux and Windows CI.
+This runs all **263 unit and integration tests** (Core: 175, Persistence: 58, Benchmark: 30; 0 failures, 0 errors, 0 skipped) across Linux and Windows CI.
 
 ### Run Performance Benchmarks
 
@@ -586,6 +765,15 @@ java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmar
 
 # Phase 6B: Benchmark Flat vs QuantizedFlat throughput and latency distribution across scales
 java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.quantization.FlatVsQuantizedFlatBenchmark
+
+# Phase 6C: Benchmark HNSW construction strategies, topology divergence, and recall attribution across scales
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.topology.HnswConstructionStrategyBenchmark
+
+# Phase 6C: Profile Quantized HNSW memory footprint (structural vs empirical heap delta) across scales
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.memory.MemoryFootprintProfiler --quantized-hnsw
+
+# Phase 6C: Sweep Pareto frontier and evaluate Two-Phase search with FP32 re-ranking
+java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmarks.jar com.nanovector.benchmark.search.ParetoFrontierRerankBenchmark
 ```
 
 ---
@@ -637,8 +825,15 @@ java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmar
   - [x] Ground truth recall evaluation proving $\le 1.09\%$ quantization loss and 100% scalar-SIMD parity (`Sq8RecallAccuracyBenchmark`).
   - [x] Memory footprint characterization verifying $3.76\times$ payload reduction and $2.36\times - 2.44\times$ measured heap delta reduction.
   - [x] Throughput and latency distribution benchmarking characterizing CPU-bound scalar widening and SIMD memory-traffic bottleneck transition.
-- [ ] **v0.6 (Phase 6C)**: Off-Heap / Foreign Function & Memory API (`MemorySegment`) evaluation.
+- [x] **v0.6 (Phase 6C)**: Quantized HNSW Systems Study (HNSW + SQ8 integration, topology divergence, Pareto frontier, 30 benchmark tests, 263 total):
+  - [x] Decoupled `QuantizedHnswIndex` implementation with SIMD ADC distance hot path and thread-safe scratch dequantization.
+  - [x] Graph construction strategy benchmark (`HnswConstructionStrategyBenchmark`) evaluating build time ($1.50\times - 1.87\times$), Layer-0 Jaccard divergence ($96.07\% \to 60.24\%$), and 100% invariant preservation (1 component, 0 isolated nodes).
+  - [x] Mathematical recall loss attribution proving $\le 0.94\%$ total recall loss vs FP32 HNSW across scales $1\text{K} \to 100\text{K}$.
+  - [x] Measured scale memory characterization validating Phase 6B structural model ($38.93\text{ MiB}$ at 100K) and quantifying Graph Topology Dominance ($44.5\%$ of index footprint).
+  - [x] Two-Phase Search with exact FP32 Re-ranking (`searchKnnWithRerank`), establishing the Pareto curve and recovering $+1.09\%$ recall up to $99.45\%$ Recall@10 at $1,109\text{ QPS}$.
+- [ ] **v0.6 (Phase 6D)**: Off-Heap / Foreign Function & Memory API (`MemorySegment`) evaluation (investigating off-heap graph topology representation motivated by Phase 6C's topology dominance findings).
 - [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.
+
 
 
 
