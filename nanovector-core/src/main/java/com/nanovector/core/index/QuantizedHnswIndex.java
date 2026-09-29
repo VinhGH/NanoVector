@@ -11,9 +11,11 @@ import com.nanovector.core.model.SearchResult;
 import com.nanovector.core.quantization.QuantizedEuclideanDistance;
 import com.nanovector.core.quantization.QuantizedVectorStorage;
 import com.nanovector.core.storage.VectorDataView;
+import com.nanovector.core.storage.VectorStorage;
 import com.nanovector.core.util.VectorUtils;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -265,6 +267,17 @@ public final class QuantizedHnswIndex implements VectorIndex {
    * Searches for the {@code k} approximate nearest neighbors with a custom {@code efSearch}
    * parameter using SIMD ADC distance evaluation.
    *
+   * <p>/** Functional interface for evaluating exact distance between stored vectors and query
+   * vector during two-phase re-ranking.
+   */
+  @FunctionalInterface
+  public interface ExactDistanceEvaluator {
+    float distance(int internalId, float[] query);
+  }
+
+  /**
+   * Performs k-nearest neighbor search with an explicit {@code efSearch} parameter.
+   *
    * @param query query vector matching index dimension
    * @param k number of neighbors to return
    * @param efSearch size of the dynamic candidate list for this search
@@ -287,6 +300,127 @@ public final class QuantizedHnswIndex implements VectorIndex {
     int actualK = Math.min(k, storage.size());
     int effectiveEf = Math.max(efSearch, actualK);
 
+    List<NeighborSelector.Candidate> candidates = exploreCandidates(query, effectiveEf);
+
+    int resultCount = Math.min(actualK, candidates.size());
+    List<SearchResult> results = new ArrayList<>(resultCount);
+    for (int i = 0; i < resultCount; i++) {
+      NeighborSelector.Candidate c = candidates.get(i);
+      long externalId = storage.getExternalId(c.id());
+      results.add(new SearchResult(externalId, c.distance()));
+    }
+    return results;
+  }
+
+  /**
+   * Retrieves all candidate neighbors gathered at Layer 0 during graph exploration.
+   *
+   * @param query query vector matching index dimension
+   * @param efSearch beam search width during graph exploration
+   * @return list of candidate search results sorted ascending by quantized ADC distance
+   */
+  public List<SearchResult> searchKnnCandidates(float[] query, int efSearch) {
+    if (efSearch <= 0) {
+      throw new IllegalArgumentException("efSearch must be positive: " + efSearch);
+    }
+    VectorUtils.checkDimension(query, dimension);
+    VectorUtils.checkFinite(query);
+
+    if (storage.size() == 0) {
+      return Collections.emptyList();
+    }
+
+    List<NeighborSelector.Candidate> candidates = exploreCandidates(query, efSearch);
+    List<SearchResult> results = new ArrayList<>(candidates.size());
+    for (NeighborSelector.Candidate c : candidates) {
+      long externalId = storage.getExternalId(c.id());
+      results.add(new SearchResult(externalId, c.distance()));
+    }
+    return results;
+  }
+
+  /**
+   * Executes a two-phase k-NN search:
+   *
+   * <ol>
+   *   <li>Explores the graph via SQ8 SIMD ADC to gather up to {@code efSearch} candidates.
+   *   <li>Re-ranks the candidates by evaluating exact FP32 distances using the provided {@link
+   *       ExactDistanceEvaluator} and returns the Top-k.
+   * </ol>
+   *
+   * @param query query vector matching index dimension
+   * @param k number of neighbors to return
+   * @param efSearch size of the dynamic candidate list for Phase 1 exploration
+   * @param exactEvaluator evaluator providing exact FP32 distances for internal candidate IDs
+   * @return list of search results sorted ascending by exact FP32 distance
+   */
+  public List<SearchResult> searchKnnWithRerank(
+      float[] query, int k, int efSearch, ExactDistanceEvaluator exactEvaluator) {
+    if (k <= 0) {
+      throw new IllegalArgumentException("k must be positive: " + k);
+    }
+    if (efSearch <= 0) {
+      throw new IllegalArgumentException("efSearch must be positive: " + efSearch);
+    }
+    Objects.requireNonNull(exactEvaluator, "exactEvaluator must not be null");
+    VectorUtils.checkDimension(query, dimension);
+    VectorUtils.checkFinite(query);
+
+    if (storage.size() == 0) {
+      return Collections.emptyList();
+    }
+
+    int actualK = Math.min(k, storage.size());
+    int effectiveEf = Math.max(efSearch, actualK);
+
+    List<NeighborSelector.Candidate> candidates = exploreCandidates(query, effectiveEf);
+    if (candidates.isEmpty()) {
+      return Collections.emptyList();
+    }
+
+    List<SearchResult> reranked = new ArrayList<>(candidates.size());
+    for (NeighborSelector.Candidate c : candidates) {
+      float exactDist = exactEvaluator.distance(c.id(), query);
+      long externalId = storage.getExternalId(c.id());
+      reranked.add(new SearchResult(externalId, exactDist));
+    }
+
+    reranked.sort(Comparator.comparingDouble(SearchResult::distance));
+    int returnCount = Math.min(actualK, reranked.size());
+    return new ArrayList<>(reranked.subList(0, returnCount));
+  }
+
+  /**
+   * Overloaded two-phase k-NN search that evaluates exact FP32 Euclidean distances directly against
+   * the provided {@link VectorStorage} buffer without intermediate allocations.
+   *
+   * @param query query vector matching index dimension
+   * @param k number of neighbors to return
+   * @param efSearch size of the dynamic candidate list for Phase 1 exploration
+   * @param rawStorage storage holding full-precision FP32 vector buffers
+   * @return list of search results sorted ascending by exact FP32 distance
+   */
+  public List<SearchResult> searchKnnWithRerank(
+      float[] query, int k, int efSearch, VectorStorage rawStorage) {
+    Objects.requireNonNull(rawStorage, "rawStorage must not be null");
+    float[] rawBuffer = rawStorage.vectorBuffer();
+    int dim = this.dimension;
+    return searchKnnWithRerank(
+        query,
+        k,
+        efSearch,
+        (internalId, q) -> {
+          int offset = internalId * dim;
+          float sum = 0.0f;
+          for (int i = 0; i < dim; i++) {
+            float diff = q[i] - rawBuffer[offset + i];
+            sum += diff * diff;
+          }
+          return sum;
+        });
+  }
+
+  private List<NeighborSelector.Candidate> exploreCandidates(float[] query, int effectiveEf) {
     HnswGraph.DistanceToQuery distanceToQuery = buildDistanceToQuery(query);
 
     int currentEntryPoint = graph.entryPointId();
@@ -299,18 +433,8 @@ public final class QuantizedHnswIndex implements VectorIndex {
 
     // Phase 2: searchLayer at layer 0 with effectiveEf
     visitedSet.nextEpoch();
-    List<NeighborSelector.Candidate> candidates =
-        graph.searchLayer(
-            distanceToQuery, new int[] {currentEntryPoint}, effectiveEf, 0, visitedSet);
-
-    int resultCount = Math.min(actualK, candidates.size());
-    List<SearchResult> results = new ArrayList<>(resultCount);
-    for (int i = 0; i < resultCount; i++) {
-      NeighborSelector.Candidate c = candidates.get(i);
-      long externalId = storage.getExternalId(c.id());
-      results.add(new SearchResult(externalId, c.distance()));
-    }
-    return results;
+    return graph.searchLayer(
+        distanceToQuery, new int[] {currentEntryPoint}, effectiveEf, 0, visitedSet);
   }
 
   @Override

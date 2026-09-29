@@ -389,4 +389,70 @@ class QuantizedHnswIndexTest {
     // At N=1,000, D=128, efSearch=100, SQ8 HNSW recall should easily exceed 90%
     assertThat(recall).isGreaterThan(0.90);
   }
+
+  @Test
+  @DisplayName("Verify searchKnnWithRerank evaluates exact FP32 distances and re-sorts candidates")
+  void testSearchKnnWithRerank() {
+    int dim = 32;
+    int n = 100;
+    int k = 5;
+    int efSearch = 20;
+    Random rng = new Random(42L);
+
+    com.nanovector.core.storage.VectorStorage rawStorage =
+        new com.nanovector.core.storage.VectorStorage(dim, n);
+    QuantizedHnswIndex index = new QuantizedHnswIndex(dim, DistanceMetric.EUCLIDEAN, CONFIG);
+
+    for (int i = 0; i < n; i++) {
+      float[] v = randomVector(rng, dim);
+      rawStorage.insert(i, v);
+      index.insert(i, v);
+    }
+
+    float[] query = randomVector(new Random(999L), dim);
+
+    // Standard search
+    List<SearchResult> stdResults = index.searchKnn(query, k, efSearch);
+    assertThat(stdResults).hasSize(k);
+
+    // Re-ranked search
+    List<SearchResult> rerankedResults = index.searchKnnWithRerank(query, k, efSearch, rawStorage);
+    assertThat(rerankedResults).hasSize(k);
+
+    // Distance must be strictly ascending
+    for (int i = 0; i < k - 1; i++) {
+      assertThat(rerankedResults.get(i).distance())
+          .isLessThanOrEqualTo(rerankedResults.get(i + 1).distance());
+    }
+
+    // Verify exact distances
+    float[] rawBuffer = rawStorage.vectorBuffer();
+    for (SearchResult r : rerankedResults) {
+      int id = (int) r.id();
+      float expectedDist = 0.0f;
+      for (int d = 0; d < dim; d++) {
+        float diff = query[d] - rawBuffer[id * dim + d];
+        expectedDist += diff * diff;
+      }
+      assertThat(r.distance()).isCloseTo(expectedDist, org.assertj.core.data.Offset.offset(1e-5f));
+    }
+
+    // Candidate search
+    List<SearchResult> candidates = index.searchKnnCandidates(query, efSearch);
+    assertThat(candidates).isNotEmpty();
+    assertThat(candidates.size()).isLessThanOrEqualTo(efSearch);
+
+    // Error handling
+    assertThatThrownBy(() -> index.searchKnnWithRerank(query, 0, efSearch, rawStorage))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> index.searchKnnWithRerank(query, k, 0, rawStorage))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                index.searchKnnWithRerank(
+                    query, k, efSearch, (com.nanovector.core.storage.VectorStorage) null))
+        .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> index.searchKnnCandidates(query, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }
