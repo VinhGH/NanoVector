@@ -6,7 +6,10 @@ import com.nanovector.core.hnsw.HnswGraph;
 import com.nanovector.core.hnsw.HnswNode;
 import com.nanovector.core.index.FlatIndex;
 import com.nanovector.core.index.HnswIndex;
+import com.nanovector.core.index.QuantizedHnswIndex;
 import com.nanovector.core.storage.VectorDataView;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 
 /**
@@ -228,6 +231,50 @@ public final class MemoryFootprintProfiler {
         heapDelta);
   }
 
+  /** Profiles memory footprint for QuantizedHnswIndex at the given scale. */
+  public static MemoryReport profileQuantizedHnsw(
+      int vectorCount, int dimension, HnswConfig config) {
+    long rawPayload = (long) vectorCount * dimension * Float.BYTES;
+    long externalIdPayload = (long) vectorCount * Long.BYTES;
+
+    Random rng = new Random(42L);
+    float[][] dataset = generateDataset(vectorCount, dimension, rng);
+
+    // Measure empirical heap delta
+    QuantizedHnswIndex[] holder = new QuantizedHnswIndex[1];
+    long heapDelta =
+        measureHeapDelta(
+            () -> {
+              QuantizedHnswIndex index =
+                  new QuantizedHnswIndex(
+                      dimension, DistanceMetric.EUCLIDEAN, config, vectorCount, true);
+              for (int i = 0; i < vectorCount; i++) {
+                index.insert(i, dataset[i]);
+              }
+              holder[0] = index;
+            });
+
+    QuantizedHnswIndex index = holder[0];
+    long storageStructural =
+        estimateQuantizedStorageStructural(index.storage(), vectorCount, dimension);
+    long graphStructural = estimateGraphStructural(index.graph(), vectorCount);
+    long visitedSetStructural =
+        ARRAY_HEADER_BYTES + align8((long) vectorCount * Integer.BYTES) + OBJECT_HEADER_BYTES;
+    long totalGraph = graphStructural + visitedSetStructural;
+    long totalStructural = storageStructural + totalGraph + OBJECT_HEADER_BYTES + (4 * REF_BYTES);
+
+    return createReport(
+        "QuantizedHnswIndex",
+        vectorCount,
+        dimension,
+        rawPayload,
+        externalIdPayload,
+        storageStructural,
+        totalGraph,
+        totalStructural,
+        heapDelta);
+  }
+
   /** Computes the structural memory estimate of VectorStorage via VectorDataView. */
   public static long estimateStorageStructural(VectorDataView view, int count, int dimension) {
     int capacity = Math.max(count, view.vectorBuffer().length / dimension);
@@ -401,25 +448,186 @@ public final class MemoryFootprintProfiler {
         measAmp);
   }
 
+  /** Record capturing comparative memory breakdown between FP32 HNSW and Pure SQ8 HNSW. */
+  public record HnswMemoryComparisonRow(
+      int n,
+      int dimension,
+      double fp32RawVectorMiB,
+      double fp32VectorStorageMiB,
+      double fp32GraphTopologyMiB,
+      double fp32TotalStructuralMiB,
+      double fp32MeasuredHeapMiB,
+      double fp32StructuralBytesPerVec,
+      double fp32MeasuredBytesPerVec,
+      double sq8VectorStorageMiB,
+      double sq8GraphTopologyMiB,
+      double sq8TotalStructuralMiB,
+      double sq8MeasuredHeapMiB,
+      double sq8StructuralBytesPerVec,
+      double sq8MeasuredBytesPerVec,
+      double vectorStorageReduction,
+      double totalStructuralReduction,
+      double measuredHeapReduction,
+      double sq8GraphTopologyFraction) {
+
+    public String toBreakdownMarkdownRow() {
+      return String.format(
+          "| %,10d | %8.2f MiB | %10.2f MiB | %10.2f MiB | %10.2f MiB | %9.2f MiB | %10.2f MiB | %10.2f MiB | %10.2f MiB | %9.2f MiB |",
+          n,
+          fp32RawVectorMiB,
+          fp32VectorStorageMiB,
+          fp32GraphTopologyMiB,
+          fp32TotalStructuralMiB,
+          fp32MeasuredHeapMiB,
+          sq8VectorStorageMiB,
+          sq8GraphTopologyMiB,
+          sq8TotalStructuralMiB,
+          sq8MeasuredHeapMiB);
+    }
+
+    public String toComparisonMarkdownRow() {
+      return String.format(
+          "| %,10d | %10.1f B/v | %10.1f B/v | %9.1f B/v | %9.1f B/v | %11.2fx | %11.2fx | %10.2fx | %12.1f%% |",
+          n,
+          fp32StructuralBytesPerVec,
+          fp32MeasuredBytesPerVec,
+          sq8StructuralBytesPerVec,
+          sq8MeasuredBytesPerVec,
+          vectorStorageReduction,
+          totalStructuralReduction,
+          measuredHeapReduction,
+          sq8GraphTopologyFraction);
+    }
+  }
+
+  /** Compares memory footprint between FP32 HNSW and Pure SQ8 HNSW at a specific scale. */
+  public static HnswMemoryComparisonRow compareHnswMemory(int count, int dim, HnswConfig config) {
+    MemoryReport fp32 = profileHnsw(count, dim, config);
+    MemoryReport sq8 = profileQuantizedHnsw(count, dim, config);
+
+    double toMiB = 1024.0 * 1024.0;
+    double fp32Raw = fp32.rawVectorPayloadBytes() / toMiB;
+    double fp32Storage = fp32.storageStructuralBytes() / toMiB;
+    double fp32Graph = fp32.graphStructuralBytes() / toMiB;
+    double fp32Total = fp32.totalStructuralBytes() / toMiB;
+    double fp32Heap = fp32.measuredHeapDeltaBytes() / toMiB;
+
+    double sq8Storage = sq8.storageStructuralBytes() / toMiB;
+    double sq8Graph = sq8.graphStructuralBytes() / toMiB;
+    double sq8Total = sq8.totalStructuralBytes() / toMiB;
+    double sq8Heap = sq8.measuredHeapDeltaBytes() / toMiB;
+
+    double storageRed =
+        (double) fp32.storageStructuralBytes() / Math.max(1L, sq8.storageStructuralBytes());
+    double totalRed =
+        (double) fp32.totalStructuralBytes() / Math.max(1L, sq8.totalStructuralBytes());
+    double heapRed =
+        (double) fp32.measuredHeapDeltaBytes() / Math.max(1L, sq8.measuredHeapDeltaBytes());
+    double graphFrac =
+        (double) sq8.graphStructuralBytes() / Math.max(1.0, sq8.totalStructuralBytes()) * 100.0;
+
+    return new HnswMemoryComparisonRow(
+        count,
+        dim,
+        fp32Raw,
+        fp32Storage,
+        fp32Graph,
+        fp32Total,
+        fp32Heap,
+        fp32.structuralBytesPerVector(),
+        fp32.measuredBytesPerVector(),
+        sq8Storage,
+        sq8Graph,
+        sq8Total,
+        sq8Heap,
+        sq8.structuralBytesPerVector(),
+        sq8.measuredBytesPerVector(),
+        storageRed,
+        totalRed,
+        heapRed,
+        graphFrac);
+  }
+
+  /** Runs a comparative memory sweep across multiple scales. */
+  public static List<HnswMemoryComparisonRow> runHnswMemorySweep(
+      int[] scales, int dimension, HnswConfig config) {
+    List<HnswMemoryComparisonRow> rows = new ArrayList<>();
+    for (int n : scales) {
+      System.out.printf("Profiling memory footprint for Scale N = %,d (D=%d)...\n", n, dimension);
+      System.out.flush();
+      HnswMemoryComparisonRow row = compareHnswMemory(n, dimension, config);
+      rows.add(row);
+      System.out.printf(
+          "  Scale N = %,d | FP32 Struct: %.2f MiB (Heap: %.2f MiB) | SQ8 Struct: %.2f MiB (Heap: %.2f MiB) | Reduction: %.2fx (Struct), %.2fx (Heap) | Graph Frac: %.1f%%\n",
+          n,
+          row.fp32TotalStructuralMiB(),
+          row.fp32MeasuredHeapMiB(),
+          row.sq8TotalStructuralMiB(),
+          row.sq8MeasuredHeapMiB(),
+          row.totalStructuralReduction(),
+          row.measuredHeapReduction(),
+          row.sq8GraphTopologyFraction());
+      System.out.flush();
+    }
+    return rows;
+  }
+
+  public static void printMemoryReportTables(List<HnswMemoryComparisonRow> rows) {
+    System.out.println(
+        "====================================================================================================================");
+    System.out.println(
+        "                 PHASE 6C: HNSW MEMORY FOOTPRINT CHARACTERIZATION (FP32 HNSW vs PURE SQ8 HNSW)                       ");
+    System.out.println(
+        "====================================================================================================================");
+
+    System.out.println(
+        "### Table 1: Structural and Measured Heap Memory Breakdown across Scales (D=128)");
+    System.out.println(
+        "|          N |   Raw Vec | FP32 Storage |  FP32 Graph |  FP32 Total |  FP32 Heap |  SQ8 Storage |   SQ8 Graph |   SQ8 Total |   SQ8 Heap |");
+    System.out.println(
+        "|-----------:|----------:|-------------:|------------:|------------:|-----------:|-------------:|------------:|------------:|-----------:|");
+    for (HnswMemoryComparisonRow r : rows) {
+      System.out.println(r.toBreakdownMarkdownRow());
+    }
+    System.out.println();
+
+    System.out.println("### Table 2: Memory Reduction Ratios and Graph Topology Dominance (D=128)");
+    System.out.println(
+        "|          N | FP32 Struct |  FP32 Heap |  SQ8 Struct |   SQ8 Heap | Storage Red | Total Struct Red |  Heap Red | Topology Frac |");
+    System.out.println(
+        "|-----------:|------------:|-----------:|------------:|-----------:|------------:|-----------------:|----------:|--------------:|");
+    for (HnswMemoryComparisonRow r : rows) {
+      System.out.println(r.toComparisonMarkdownRow());
+    }
+    System.out.println(
+        "====================================================================================================================\n");
+  }
+
   public static void main(String[] args) {
     int[] scales = {1000, 10000, 50000, 100000};
     int dim = 128;
     HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
 
-    System.out.println(
-        "==========================================================================");
-    System.out.println("   NANOVECTOR MEMORY CHARACTERIZATION: FLAT vs HNSW (D=128)");
-    System.out.println(
-        "==========================================================================\n");
-
-    for (int n : scales) {
-      MemoryReport flatRep = profileFlat(n, dim);
-      System.out.println(flatRep.toFormattedString());
-
-      MemoryReport hnswRep = profileHnsw(n, dim, config);
-      System.out.println(hnswRep.toFormattedString());
+    if (args.length > 0 && "--flat-only".equals(args[0])) {
       System.out.println(
-          "--------------------------------------------------------------------------\n");
+          "==========================================================================");
+      System.out.println("   NANOVECTOR MEMORY CHARACTERIZATION: FLAT vs HNSW (D=128)");
+      System.out.println(
+          "==========================================================================\n");
+
+      for (int n : scales) {
+        MemoryReport flatRep = profileFlat(n, dim);
+        System.out.println(flatRep.toFormattedString());
+
+        MemoryReport hnswRep = profileHnsw(n, dim, config);
+        System.out.println(hnswRep.toFormattedString());
+        System.out.println(
+            "--------------------------------------------------------------------------\n");
+      }
+      return;
     }
+
+    List<HnswMemoryComparisonRow> rows = runHnswMemorySweep(scales, dim, config);
+    printMemoryReportTables(rows);
   }
 }

@@ -97,4 +97,55 @@ class MemoryFootprintProfilerTest {
         .contains("Raw Vector Payload")
         .contains("Storage Structural Estimate");
   }
+
+  @Test
+  @DisplayName(
+      "Verify QuantizedHnswIndex memory characterization and structural reduction vs FP32 HNSW")
+  void testProfileQuantizedHnsw() {
+    int count = 200;
+    int dim = 128;
+    HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
+
+    MemoryFootprintProfiler.MemoryReport fp32Report =
+        MemoryFootprintProfiler.profileHnsw(count, dim, config);
+    MemoryFootprintProfiler.MemoryReport sq8Report =
+        MemoryFootprintProfiler.profileQuantizedHnsw(count, dim, config);
+
+    assertThat(sq8Report.indexType()).isEqualTo("QuantizedHnswIndex");
+    assertThat(sq8Report.vectorCount()).isEqualTo(count);
+    assertThat(sq8Report.dimension()).isEqualTo(dim);
+
+    // Vector storage must be significantly smaller in SQ8 HNSW
+    assertThat(sq8Report.storageStructuralBytes()).isLessThan(fp32Report.storageStructuralBytes());
+
+    // Total structural footprint must be smaller in SQ8 HNSW
+    assertThat(sq8Report.totalStructuralBytes()).isLessThan(fp32Report.totalStructuralBytes());
+    assertThat(sq8Report.graphStructuralBytes()).isGreaterThan(0L);
+
+    String formatted = sq8Report.toFormattedString();
+    assertThat(formatted)
+        .contains("QuantizedHnswIndex")
+        .contains("Graph Structural Estimate")
+        .contains("Total Structural Estimate");
+  }
+
+  @Test
+  @DisplayName("Verify HnswMemoryComparisonRow metrics, reduction factors, and markdown formatting")
+  void testHnswMemoryComparison() {
+    int count = 200;
+    int dim = 128;
+    HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
+
+    MemoryFootprintProfiler.HnswMemoryComparisonRow row =
+        MemoryFootprintProfiler.compareHnswMemory(count, dim, config);
+
+    assertThat(row.n()).isEqualTo(count);
+    assertThat(row.dimension()).isEqualTo(dim);
+    assertThat(row.vectorStorageReduction()).isGreaterThan(2.0);
+    assertThat(row.totalStructuralReduction()).isGreaterThan(1.2);
+    assertThat(row.sq8GraphTopologyFraction()).isBetween(10.0, 90.0);
+
+    assertThat(row.toBreakdownMarkdownRow()).contains("|").contains("MiB");
+    assertThat(row.toComparisonMarkdownRow()).contains("|").contains("B/v");
+  }
 }
