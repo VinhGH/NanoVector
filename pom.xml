@@ -16,14 +16,14 @@
     <description>High-performance vector similarity search engine</description>
 
     <properties>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <junit.version>5.10.2</junit.version>
         <assertj.version>3.25.3</assertj.version>
 
         <spotless.version>2.43.0</spotless.version>
-        <jacoco.version>0.8.12</jacoco.version>
+        <jacoco.version>0.8.14</jacoco.version>
         <maven.compiler.version>3.13.0</maven.compiler.version>
         <maven.surefire.version>3.2.5</maven.surefire.version>
         <spotbugs.version>4.8.6.6</spotbugs.version>
