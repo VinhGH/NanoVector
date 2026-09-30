@@ -7,6 +7,7 @@ import com.nanovector.core.hnsw.HnswNode;
 import com.nanovector.core.index.FlatIndex;
 import com.nanovector.core.index.HnswIndex;
 import com.nanovector.core.index.QuantizedHnswIndex;
+import com.nanovector.core.offheap.OffHeapQuantizedHnswIndex;
 import com.nanovector.core.storage.VectorDataView;
 import java.util.ArrayList;
 import java.util.List;
@@ -53,11 +54,45 @@ public final class MemoryFootprintProfiler {
       long graphStructuralBytes,
       long totalStructuralBytes,
       long measuredHeapDeltaBytes,
+      long nativeAllocatedBytes,
       double structuralBytesPerVector,
       double measuredBytesPerVector,
       double graphOverheadPerVector,
       double structuralAmplification,
       double measuredAmplification) {
+
+    public MemoryReport(
+        String indexType,
+        int vectorCount,
+        int dimension,
+        long rawVectorPayloadBytes,
+        long externalIdPayloadBytes,
+        long storageStructuralBytes,
+        long graphStructuralBytes,
+        long totalStructuralBytes,
+        long measuredHeapDeltaBytes,
+        double structuralBytesPerVector,
+        double measuredBytesPerVector,
+        double graphOverheadPerVector,
+        double structuralAmplification,
+        double measuredAmplification) {
+      this(
+          indexType,
+          vectorCount,
+          dimension,
+          rawVectorPayloadBytes,
+          externalIdPayloadBytes,
+          storageStructuralBytes,
+          graphStructuralBytes,
+          totalStructuralBytes,
+          measuredHeapDeltaBytes,
+          0L,
+          structuralBytesPerVector,
+          measuredBytesPerVector,
+          graphOverheadPerVector,
+          structuralAmplification,
+          measuredAmplification);
+    }
 
     public String toFormattedString() {
       StringBuilder sb = new StringBuilder();
@@ -94,6 +129,14 @@ public final class MemoryFootprintProfiler {
           String.format(
               "  Measured Heap Usage Delta:    %8.2f MiB (%d bytes)%n",
               measuredHeapDeltaBytes / (1024.0 * 1024.0), measuredHeapDeltaBytes));
+      if (nativeAllocatedBytes > 0) {
+        sb.append(
+            String.format(
+                "  Native Allocated Memory:      %8.2f MiB (%d bytes)%n",
+                nativeAllocatedBytes / (1024.0 * 1024.0), nativeAllocatedBytes));
+        double totalMiB = (measuredHeapDeltaBytes + nativeAllocatedBytes) / (1024.0 * 1024.0);
+        sb.append(String.format("  Total Footprint (Heap+Native):%8.2f MiB%n", totalMiB));
+      }
       sb.append(
           String.format(
               "  Structural Bytes / Vector:    %8.1f bytes/vector%n", structuralBytesPerVector));
@@ -273,6 +316,72 @@ public final class MemoryFootprintProfiler {
         totalGraph,
         totalStructural,
         heapDelta);
+  }
+
+  /** Profiles memory footprint for OffHeapQuantizedHnswIndex at the given scale. */
+  public static MemoryReport profileOffHeapQuantizedHnsw(
+      int vectorCount, int dimension, HnswConfig config) {
+    long rawPayload = (long) vectorCount * dimension * Float.BYTES;
+    long externalIdPayload = (long) vectorCount * Long.BYTES;
+
+    Random rng = new Random(42L);
+    float[][] dataset = generateDataset(vectorCount, dimension, rng);
+
+    // Measure empirical heap delta
+    OffHeapQuantizedHnswIndex[] holder = new OffHeapQuantizedHnswIndex[1];
+    long heapDelta =
+        measureHeapDelta(
+            () -> {
+              OffHeapQuantizedHnswIndex index =
+                  new OffHeapQuantizedHnswIndex(
+                      dimension, DistanceMetric.EUCLIDEAN, config, vectorCount, true);
+              for (int i = 0; i < vectorCount; i++) {
+                index.insert(i, dataset[i]);
+              }
+              holder[0] = index;
+            });
+
+    OffHeapQuantizedHnswIndex index = holder[0];
+    long nativeAllocated = index.nativeAllocatedBytes();
+    long storageNative = index.storage().nativeAllocatedBytes();
+    long graphNative = index.graph().layout().nativeAllocatedBytes();
+
+    // On-heap structural components:
+    // HashMap<Long, Integer> externalToInternal + visitedSet int[] + index object header
+    int tableCapacity = Integer.highestOneBit(Math.max(16, (int) (vectorCount / 0.75f))) << 1;
+    long tableArrayBytes = ARRAY_HEADER_BYTES + align8((long) tableCapacity * REF_BYTES);
+    long mapEntriesBytes = (long) vectorCount * HASHMAP_ENTRY_TOTAL;
+    long mapObjectBytes = OBJECT_HEADER_BYTES + (4 * REF_BYTES) + 8;
+    long totalOnHeapMap = mapObjectBytes + tableArrayBytes + mapEntriesBytes;
+
+    long visitedSetStructural =
+        ARRAY_HEADER_BYTES + align8((long) vectorCount * Integer.BYTES) + OBJECT_HEADER_BYTES;
+
+    long totalStructural =
+        nativeAllocated + totalOnHeapMap + visitedSetStructural + OBJECT_HEADER_BYTES;
+
+    double structuralPerVec = (double) totalStructural / vectorCount;
+    double measuredPerVec = (double) heapDelta / vectorCount;
+    double graphPerVec = (double) graphNative / vectorCount;
+    double structAmp = (double) totalStructural / rawPayload;
+    double measAmp = (double) heapDelta / rawPayload;
+
+    return new MemoryReport(
+        "OffHeapQuantizedHnswIndex",
+        vectorCount,
+        dimension,
+        rawPayload,
+        externalIdPayload,
+        storageNative,
+        graphNative,
+        totalStructural,
+        heapDelta,
+        nativeAllocated,
+        structuralPerVec,
+        measuredPerVec,
+        graphPerVec,
+        structAmp,
+        measAmp);
   }
 
   /** Computes the structural memory estimate of VectorStorage via VectorDataView. */
@@ -603,10 +712,155 @@ public final class MemoryFootprintProfiler {
         "====================================================================================================================\n");
   }
 
+  /** Comparative memory characterization between FP32 On-Heap, SQ8 On-Heap, and SQ8 Off-Heap. */
+  public record ThreeWayMemoryComparisonRow(
+      int n,
+      int dimension,
+      double fp32HeapMiB,
+      double onHeapSq8HeapMiB,
+      double offHeapSq8HeapMiB,
+      double offHeapSq8NativeStorageMiB,
+      double offHeapSq8NativeGraphMiB,
+      double offHeapSq8NativeTotalMiB,
+      double offHeapTotalFootprintMiB,
+      double heapReductionVsFp32,
+      double heapReductionVsOnHeapSq8,
+      double totalFootprintRatioVsOnHeapSq8,
+      boolean nativeAccountingHealthy) {
+
+    public String toBreakdownMarkdownRow() {
+      return String.format(
+          "| %,10d | %9.2f MiB | %11.2f MiB | %11.2f MiB | %11.2f MiB | %11.2f MiB | %12.2f MiB | %11.2f MiB |",
+          n,
+          fp32HeapMiB,
+          onHeapSq8HeapMiB,
+          offHeapSq8HeapMiB,
+          offHeapSq8NativeStorageMiB,
+          offHeapSq8NativeGraphMiB,
+          offHeapSq8NativeTotalMiB,
+          offHeapTotalFootprintMiB);
+    }
+
+    public String toComparisonMarkdownRow() {
+      return String.format(
+          "| %,10d | %16.2fx | %16.2fx | %16.2fx | %20b |",
+          n,
+          heapReductionVsFp32,
+          heapReductionVsOnHeapSq8,
+          totalFootprintRatioVsOnHeapSq8,
+          nativeAccountingHealthy);
+    }
+  }
+
+  /**
+   * Compares memory footprint across FP32 On-Heap, SQ8 On-Heap, and SQ8 Off-Heap at a specific
+   * scale.
+   */
+  public static ThreeWayMemoryComparisonRow compareThreeWayMemory(
+      int count, int dim, HnswConfig config) {
+    MemoryReport fp32 = profileHnsw(count, dim, config);
+    MemoryReport sq8 = profileQuantizedHnsw(count, dim, config);
+    MemoryReport offHeap = profileOffHeapQuantizedHnsw(count, dim, config);
+
+    double toMiB = 1024.0 * 1024.0;
+    double fp32Heap = fp32.measuredHeapDeltaBytes() / toMiB;
+    double onHeapSq8Heap = sq8.measuredHeapDeltaBytes() / toMiB;
+    double offHeapHeap = offHeap.measuredHeapDeltaBytes() / toMiB;
+    double nativeStorage = offHeap.storageStructuralBytes() / toMiB;
+    double nativeGraph = offHeap.graphStructuralBytes() / toMiB;
+    double nativeTotal = offHeap.nativeAllocatedBytes() / toMiB;
+    double offHeapTotal =
+        (offHeap.measuredHeapDeltaBytes() + offHeap.nativeAllocatedBytes()) / toMiB;
+
+    double heapRedVsFp32 = fp32Heap / Math.max(0.01, offHeapHeap);
+    double heapRedVsSq8 = onHeapSq8Heap / Math.max(0.01, offHeapHeap);
+    double totalFootprintRatio = offHeapTotal / Math.max(0.01, sq8.totalStructuralBytes() / toMiB);
+
+    boolean accountingHealthy =
+        offHeap.nativeAllocatedBytes() > 0
+            && Math.abs(nativeStorage + nativeGraph - nativeTotal) < 0.001;
+
+    return new ThreeWayMemoryComparisonRow(
+        count,
+        dim,
+        fp32Heap,
+        onHeapSq8Heap,
+        offHeapHeap,
+        nativeStorage,
+        nativeGraph,
+        nativeTotal,
+        offHeapTotal,
+        heapRedVsFp32,
+        heapRedVsSq8,
+        totalFootprintRatio,
+        accountingHealthy);
+  }
+
+  /** Runs a three-way comparative memory sweep across multiple scales. */
+  public static List<ThreeWayMemoryComparisonRow> runThreeWayMemorySweep(
+      int[] scales, int dimension, HnswConfig config) {
+    List<ThreeWayMemoryComparisonRow> rows = new ArrayList<>();
+    for (int n : scales) {
+      System.out.printf(
+          "Profiling 3-way memory footprint for Scale N = %,d (D=%d)...\n", n, dimension);
+      System.out.flush();
+      ThreeWayMemoryComparisonRow row = compareThreeWayMemory(n, dimension, config);
+      rows.add(row);
+      System.out.printf(
+          "  Scale N = %,d | FP32 Heap: %.2f MiB | SQ8 Heap: %.2f MiB | Off-Heap Heap: %.2f MiB (Native: %.2f MiB, Total: %.2f MiB) | Heap Red vs SQ8: %.2fx\n",
+          n,
+          row.fp32HeapMiB(),
+          row.onHeapSq8HeapMiB(),
+          row.offHeapSq8HeapMiB(),
+          row.offHeapSq8NativeTotalMiB(),
+          row.offHeapTotalFootprintMiB(),
+          row.heapReductionVsOnHeapSq8());
+      System.out.flush();
+    }
+    return rows;
+  }
+
+  public static void printThreeWayMemoryReportTables(List<ThreeWayMemoryComparisonRow> rows) {
+    System.out.println(
+        "====================================================================================================================");
+    System.out.println(
+        "              PHASE 6D: THREE-WAY MEMORY CHARACTERIZATION (FP32 vs ON-HEAP SQ8 vs OFF-HEAP SQ8)                     ");
+    System.out.println(
+        "====================================================================================================================");
+
+    System.out.println(
+        "### Table 1: Measured Heap Delta and Native Memory Breakdown across Scales (D=128)");
+    System.out.println(
+        "|          N |  FP32 Heap | On-Heap SQ8 | OffHeap Heap | OffHeap Stor | OffHeap Graph| OffHeap NatTot| OffHeap Total|");
+    System.out.println(
+        "|-----------:|-----------:|------------:|-------------:|-------------:|-------------:|--------------:|-------------:|");
+    for (ThreeWayMemoryComparisonRow r : rows) {
+      System.out.println(r.toBreakdownMarkdownRow());
+    }
+    System.out.println();
+
+    System.out.println("### Table 2: Measured JVM Heap Reduction and Footprint Trade-off (D=128)");
+    System.out.println(
+        "|          N | Heap Red vs FP32 | Heap Red vs SQ8  | Footprint Ratio vs SQ8 | Native Accounting Ok |");
+    System.out.println(
+        "|-----------:|-----------------:|-----------------:|-----------------------:|---------------------:|");
+    for (ThreeWayMemoryComparisonRow r : rows) {
+      System.out.println(r.toComparisonMarkdownRow());
+    }
+    System.out.println(
+        "====================================================================================================================\n");
+  }
+
   public static void main(String[] args) {
     int[] scales = {1000, 10000, 50000, 100000};
     int dim = 128;
     HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
+
+    if (args.length > 0 && ("--phase6d".equals(args[0]) || "--offheap".equals(args[0]))) {
+      List<ThreeWayMemoryComparisonRow> rows = runThreeWayMemorySweep(scales, dim, config);
+      printThreeWayMemoryReportTables(rows);
+      return;
+    }
 
     if (args.length > 0 && "--flat-only".equals(args[0])) {
       System.out.println(

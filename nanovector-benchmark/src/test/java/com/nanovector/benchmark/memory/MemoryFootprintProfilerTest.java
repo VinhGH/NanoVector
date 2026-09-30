@@ -148,4 +148,48 @@ class MemoryFootprintProfilerTest {
     assertThat(row.toBreakdownMarkdownRow()).contains("|").contains("MiB");
     assertThat(row.toComparisonMarkdownRow()).contains("|").contains("B/v");
   }
+
+  @Test
+  @DisplayName(
+      "Verify OffHeapQuantizedHnswIndex memory characterization and native allocation accounting")
+  void testProfileOffHeapQuantizedHnsw() {
+    int count = 200;
+    int dim = 128;
+    HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
+
+    MemoryFootprintProfiler.MemoryReport offHeapReport =
+        MemoryFootprintProfiler.profileOffHeapQuantizedHnsw(count, dim, config);
+
+    assertThat(offHeapReport.indexType()).isEqualTo("OffHeapQuantizedHnswIndex");
+    assertThat(offHeapReport.vectorCount()).isEqualTo(count);
+    assertThat(offHeapReport.dimension()).isEqualTo(dim);
+    assertThat(offHeapReport.nativeAllocatedBytes()).isGreaterThan(0L);
+    assertThat(offHeapReport.storageStructuralBytes()).isGreaterThan(0L);
+    assertThat(offHeapReport.graphStructuralBytes()).isGreaterThan(0L);
+
+    String formatted = offHeapReport.toFormattedString();
+    assertThat(formatted)
+        .contains("OffHeapQuantizedHnswIndex")
+        .contains("Native Allocated Memory")
+        .contains("Total Footprint (Heap+Native)");
+  }
+
+  @Test
+  @DisplayName("Verify ThreeWayMemoryComparisonRow metrics and accounting health")
+  void testThreeWayMemoryComparison() {
+    int count = 200;
+    int dim = 128;
+    HnswConfig config = HnswConfig.withSeed(42L).withEfSearch(50);
+
+    MemoryFootprintProfiler.ThreeWayMemoryComparisonRow row =
+        MemoryFootprintProfiler.compareThreeWayMemory(count, dim, config);
+
+    assertThat(row.n()).isEqualTo(count);
+    assertThat(row.dimension()).isEqualTo(dim);
+    assertThat(row.offHeapSq8NativeTotalMiB()).isGreaterThan(0.0);
+    assertThat(row.nativeAccountingHealthy()).isTrue();
+
+    assertThat(row.toBreakdownMarkdownRow()).contains("|").contains("MiB");
+    assertThat(row.toComparisonMarkdownRow()).contains("|");
+  }
 }
