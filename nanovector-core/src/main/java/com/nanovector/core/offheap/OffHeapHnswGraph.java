@@ -148,10 +148,11 @@ public final class OffHeapHnswGraph implements AutoCloseable {
 
     while (improved) {
       improved = false;
-      int deg = layout.degree(bestId, layer);
+      int currentExploringId = bestId;
+      int deg = layout.degree(currentExploringId, layer);
 
       for (int i = 0; i < deg; i++) {
-        int neighborId = layout.getNeighbor(bestId, layer, i);
+        int neighborId = layout.getNeighbor(currentExploringId, layer, i);
         float neighborDist = distanceToQuery.distance(neighborId);
         if (neighborDist < bestDist) {
           bestId = neighborId;

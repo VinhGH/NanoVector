@@ -179,6 +179,28 @@ public final class OffHeapQuantizedVectorStorage implements AutoCloseable {
     MemorySegment.copy(vectorSegment, ValueLayout.JAVA_BYTE, offset, dest, 0, dimension);
   }
 
+  /**
+   * Dequantizes and copies the reconstructed FP32 vector directly into the provided destination
+   * array without heap allocation.
+   */
+  public void copyVector(int internalId, float[] dest) {
+    checkClosed();
+    checkBounds(internalId);
+    Objects.requireNonNull(dest, "Destination buffer must not be null");
+    if (dest.length < dimension) {
+      throw new IllegalArgumentException(
+          "Destination array length " + dest.length + " is smaller than dimension " + dimension);
+    }
+    long offset = (long) internalId * vectorStrideBytes;
+    float min = vectorSegment.get(ValueLayout.JAVA_FLOAT, offset);
+    float scale = vectorSegment.get(ValueLayout.JAVA_FLOAT, offset + 4L);
+    long dataOffset = offset + 8L;
+    for (int i = 0; i < dimension; i++) {
+      int q = vectorSegment.get(ValueLayout.JAVA_BYTE, dataOffset + i) & 0xFF;
+      dest[i] = min + scale * q;
+    }
+  }
+
   /** Dequantizes and reconstructs the full-precision FP32 vector for the specified internal ID. */
   public float[] getVector(int internalId) {
     checkClosed();
