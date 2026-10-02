@@ -1,6 +1,9 @@
 package com.nanovector.cli;
 
+import com.nanovector.cli.command.CreateCommand;
+import com.nanovector.cli.command.InsertCommand;
 import com.nanovector.cli.command.InspectCommand;
+import com.nanovector.cli.command.QueryCommand;
 import java.util.concurrent.Callable;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -16,7 +19,13 @@ import picocli.CommandLine.Command;
     mixinStandardHelpOptions = true,
     version = "NanoVector 0.1.0",
     description = "NanoVector CLI - Vector Similarity Search Engine Command Line Interface",
-    subcommands = {InspectCommand.class})
+    subcommands = {
+      InspectCommand.class,
+      CreateCommand.class,
+      InsertCommand.class,
+      QueryCommand.class,
+      CommandLine.HelpCommand.class
+    })
 public class NanoVectorCli implements Callable<Integer> {
 
   @Override
