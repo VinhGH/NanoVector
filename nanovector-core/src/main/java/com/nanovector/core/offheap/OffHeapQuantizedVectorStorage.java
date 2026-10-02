@@ -60,7 +60,7 @@ public final class OffHeapQuantizedVectorStorage implements AutoCloseable {
 
   public OffHeapQuantizedVectorStorage(
       int dimension, int initialCapacity, ScalarQuantizer quantizer) {
-    this(dimension, initialCapacity, quantizer, Arena.ofConfined(), true);
+    this(dimension, initialCapacity, quantizer, Arena.ofShared(), true);
   }
 
   public OffHeapQuantizedVectorStorage(

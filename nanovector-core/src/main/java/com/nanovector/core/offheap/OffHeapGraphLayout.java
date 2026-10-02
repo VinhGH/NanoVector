@@ -58,7 +58,7 @@ public final class OffHeapGraphLayout implements AutoCloseable {
   }
 
   public OffHeapGraphLayout(HnswConfig config, int initialCapacity) {
-    this(config, initialCapacity, Arena.ofConfined(), true);
+    this(config, initialCapacity, Arena.ofShared(), true);
   }
 
   public OffHeapGraphLayout(HnswConfig config, int initialCapacity, Arena arena) {

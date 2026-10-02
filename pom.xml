@@ -29,6 +29,7 @@
         <spotbugs.version>4.8.6.6</spotbugs.version>
         <jmh.version>1.37</jmh.version>
         <picocli.version>4.7.6</picocli.version>
+        <spring-boot.version>3.4.0</spring-boot.version>
         <argLine></argLine>
     </properties>
 
@@ -37,10 +38,19 @@
         <module>nanovector-persistence</module>
         <module>nanovector-benchmark</module>
         <module>nanovector-cli</module>
+        <module>nanovector-server</module>
     </modules>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
             <dependency>
                 <groupId>org.junit</groupId>
                 <artifactId>junit-bom</artifactId>
@@ -107,6 +117,9 @@
                     <version>${maven.surefire.version}</version>
                     <configuration>
                         <argLine>@{argLine} --add-modules jdk.incubator.vector</argLine>
+                        <systemPropertyVariables>
+                            <spring.classformat.ignore>true</spring.classformat.ignore>
+                        </systemPropertyVariables>
                     </configuration>
                 </plugin>
 

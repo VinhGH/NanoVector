@@ -9,6 +9,7 @@ import com.nanovector.core.hnsw.HnswNode;
 import com.nanovector.core.hnsw.LevelGenerator;
 import com.nanovector.core.hnsw.NeighborSelector;
 import com.nanovector.core.model.SearchResult;
+import com.nanovector.core.search.SearchContextProvider;
 import com.nanovector.core.storage.VectorStorage;
 import com.nanovector.core.util.VectorUtils;
 import java.util.ArrayList;
@@ -47,7 +48,7 @@ public final class HnswIndex implements VectorIndex {
   private final HnswGraph graph;
   private final HnswConfig config;
   private final LevelGenerator levelGenerator;
-  private final EpochVisitedSet visitedSet;
+  private final EpochVisitedSet insertionVisitedSet;
   private final NeighborSelector.NodeDistanceEvaluator nodeEvaluator;
 
   public HnswIndex(int dimension, DistanceMetric metric, HnswConfig config) {
@@ -87,7 +88,7 @@ public final class HnswIndex implements VectorIndex {
     this.storage = new VectorStorage(dimension, initialCapacity);
     this.graph = new HnswGraph(config);
     this.levelGenerator = new LevelGenerator(config);
-    this.visitedSet = new EpochVisitedSet(initialCapacity);
+    this.insertionVisitedSet = new EpochVisitedSet(initialCapacity);
     this.nodeEvaluator =
         (a, b) ->
             this.calculator.distance(
@@ -116,7 +117,7 @@ public final class HnswIndex implements VectorIndex {
     this.storage = Objects.requireNonNull(storage, "Storage must not be null");
     this.graph = Objects.requireNonNull(graph, "Graph must not be null");
     this.levelGenerator = new LevelGenerator(config);
-    this.visitedSet = new EpochVisitedSet(Math.max(1024, storage.size() + 1));
+    this.insertionVisitedSet = new EpochVisitedSet(Math.max(1024, storage.size() + 1));
     this.nodeEvaluator =
         (a, b) ->
             this.calculator.distance(
@@ -152,7 +153,7 @@ public final class HnswIndex implements VectorIndex {
     graph.addNode(newNode);
 
     // 4. Ensure visitedSet capacity
-    visitedSet.ensureCapacity(internalId + 1);
+    insertionVisitedSet.ensureCapacity(internalId + 1);
 
     // 5. If this is the first node, nothing more to do
     if (graph.size() == 1) {
@@ -178,11 +179,12 @@ public final class HnswIndex implements VectorIndex {
     // 0
     int insertionTopLayer = Math.min(currentMaxLevel, nodeLevel);
     for (int layer = insertionTopLayer; layer >= 0; layer--) {
-      visitedSet.nextEpoch();
+      insertionVisitedSet.nextEpoch();
 
       int ef = config.efConstruction();
       List<NeighborSelector.Candidate> candidates =
-          graph.searchLayer(distanceToNew, new int[] {currentEntryPoint}, ef, layer, visitedSet);
+          graph.searchLayer(
+              distanceToNew, new int[] {currentEntryPoint}, ef, layer, insertionVisitedSet);
 
       // Select neighbors using Algorithm 4 heuristic with fallback
       int maxDegree = graph.maxDegreeForLayer(layer);
@@ -221,6 +223,30 @@ public final class HnswIndex implements VectorIndex {
    * @return list of search results sorted ascending by distance
    */
   public List<SearchResult> searchKnn(float[] query, int k, int efSearch) {
+    EpochVisitedSet context = SearchContextProvider.defaultProvider().acquire(storage.size() + 1);
+    try {
+      return searchKnn(query, k, efSearch, context);
+    } finally {
+      SearchContextProvider.defaultProvider().release(context);
+    }
+  }
+
+  /**
+   * Searches for the {@code k} approximate nearest neighbors using a caller-provided or pooled
+   * {@link EpochVisitedSet} to guarantee concurrent search session isolation.
+   *
+   * @param query query vector
+   * @param k number of neighbors to return
+   * @param efSearch size of the dynamic candidate list for this search
+   * @param customVisitedSet isolated visited set for this search session (if null, acquired from
+   *     pool)
+   * @return list of search results sorted ascending by distance
+   */
+  public List<SearchResult> searchKnn(
+      float[] query, int k, int efSearch, EpochVisitedSet customVisitedSet) {
+    if (customVisitedSet == null) {
+      return searchKnn(query, k, efSearch);
+    }
     if (k <= 0) {
       throw new IllegalArgumentException("k must be positive: " + k);
     }
@@ -255,10 +281,11 @@ public final class HnswIndex implements VectorIndex {
     }
 
     // Phase 2: searchLayer at layer 0 with efSearch
-    visitedSet.nextEpoch();
+    customVisitedSet.ensureCapacity(storage.size() + 1);
+    customVisitedSet.nextEpoch();
     List<NeighborSelector.Candidate> candidates =
         graph.searchLayer(
-            distanceToQuery, new int[] {currentEntryPoint}, effectiveEf, 0, visitedSet);
+            distanceToQuery, new int[] {currentEntryPoint}, effectiveEf, 0, customVisitedSet);
 
     // Extract top-K and convert internalId → externalId
     int resultCount = Math.min(actualK, candidates.size());
