@@ -6,16 +6,16 @@ An experimental, high-performance in-memory vector similarity search engine writ
 
 ## 🎯 Architecture & Modules
 
-NanoVector is organized as a multi-module Maven project:
+NanoVector is organized as a modular, decoupled multi-module Maven project:
 
 ```text
 NanoVector
 │
-├── nanovector-core          # Vector storage, distance metrics, heap, FlatIndex, and HNSW
-├── nanovector-persistence   # Binary serialization format (.nvec) for saving/loading indexes
-├── nanovector-benchmark     # Benchmarking suite (Recall@K, Latency P50/P95/P99, Memory profiling)
-├── nanovector-cli           # Standalone command-line interface
-└── nanovector-server        # Spring Boot REST API for exposing the search engine
+├── nanovector-core          # Vector storage, SIMD distance kernels, HNSW, SQ8 quantization, Off-Heap FFM layouts
+├── nanovector-persistence   # NVEC v1 streaming binary format with hardware-accelerated CRC32C and atomic file replacement
+├── nanovector-benchmark     # Comprehensive JMH benchmarks, recall sweeps, memory profiling, and allocation diagnostics
+├── nanovector-cli           # Standalone command-line interface tool (Picocli) for index creation, inspection, and querying
+└── nanovector-server        # Production-ready Spring Boot 3.4 REST microservice, OpenAPI/Swagger UI, and concurrent session manager
 ```
 
 ---
@@ -836,6 +836,82 @@ java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmar
 
 ---
 
+## 💻 Standalone Command-Line Interface (`nanovector-cli`)
+
+`nanovector-cli` provides an allocation-conscious, scriptable command-line tool powered by Picocli for operating on `.nvec` binary index files without running a web server.
+
+### Building and Running the CLI
+```bash
+./mvnw package -pl nanovector-cli -am -DskipTests
+java --add-modules jdk.incubator.vector -jar nanovector-cli/target/nanovector-cli-0.1.0-SNAPSHOT.jar [command] [options]
+```
+
+### Supported CLI Commands:
+1. **`create`**: Initialize and persist an empty `.nvec` index file.
+   ```bash
+   # Create an HNSW index with Euclidean metric and dimension 128
+   java --add-modules jdk.incubator.vector -jar nanovector-cli.jar create -d 128 -m EUCLIDEAN -t HNSW index.nvec
+   ```
+2. **`inspect`**: Verify file integrity via hardware CRC32C and display format metadata.
+   ```bash
+   java --add-modules jdk.incubator.vector -jar nanovector-cli.jar inspect index.nvec
+   ```
+3. **`insert`**: Ingest vectors from a CSV file into an existing `.nvec` index.
+   ```bash
+   java --add-modules jdk.incubator.vector -jar nanovector-cli.jar insert index.nvec --csv vectors.csv
+   ```
+4. **`query`**: Execute k-NN similarity search against an `.nvec` index.
+   ```bash
+   java --add-modules jdk.incubator.vector -jar nanovector-cli.jar query index.nvec -k 5 --vector "0.1,0.2,...,0.5"
+   ```
+
+---
+
+## 🌐 High-Performance REST API Microservice (`nanovector-server`)
+
+`nanovector-server` exposes NanoVector's core vector search engine as a concurrent HTTP microservice built on Spring Boot 3.4.0 and Java 25 LTS.
+
+### Key Architectural Characteristics
+1. **Thread-Safe Search Traversal & Context Pooling**:
+   - Concurrent queries obtain independent `EpochVisitedSet` instances from a non-blocking object pool (`SearchContextProvider`) residing directly in `nanovector-core`.
+   - Index instances are natively thread-safe without requiring Spring or external synchronizers.
+2. **Fair Read-Write Locking & Native Lifecycle Draining (`DefaultManagedIndex`)**:
+   - Synchronizes concurrent readers and mutating batch writers using fair `ReentrantReadWriteLock(true)`.
+   - Idempotent `close()` sets an atomic flag rejecting new requests immediately and acquires the exclusive write lock to **drain all in-flight reader threads before closing underlying native FFM arenas or file descriptors**, completely eliminating JVM use-after-free crashes.
+   - **Save** operations hold the read lock throughout the entire duration of binary serialization (`NvecWriter`), guaranteeing consistent disk snapshots without torn state.
+3. **Storage Security & Path Traversal Prevention**:
+   - Clients interact with index names or identifiers; arbitrary filesystem paths are strictly disallowed.
+   - Files are resolved inside the designated server storage directory (`nanovector.server.data-dir`), verifying `resolved.startsWith(baseDir)` and stripping path traversal tokens (`..`, `/`, `\`).
+4. **Interactive OpenAPI 3.0 & Swagger UI**:
+   - **Dashboard**: `http://localhost:8080/swagger-ui.html`
+   - **OpenAPI Schema**: `http://localhost:8080/v3/api-docs`
+5. **Operational Health Indicator**:
+   - Spring Boot Actuator endpoint `GET /actuator/health` reports service readiness and registered index counts without leaking sensitive internal paths or memory layout specifics.
+
+### REST API Endpoints Overview
+
+| Method | Endpoint | HTTP Status | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/indexes` | `201 Created` | Create and register a new vector index (`FLAT`, `HNSW`, `HNSW_SQ8`, `HNSW_SQ8_OFFHEAP`) |
+| `GET` | `/api/v1/indexes` | `200 OK` | List metadata of all registered indexes |
+| `GET` | `/api/v1/indexes/{name}` | `200 OK` | Get index metadata descriptor |
+| `DELETE` | `/api/v1/indexes/{name}` | `204 No Content` | Delete and drain index, deallocating native resources |
+| `POST` | `/api/v1/indexes/{name}/vectors` | `200 OK` | Batch insert vectors with atomic pre-validation |
+| `POST` | `/api/v1/indexes/{name}/query` | `200 OK` | Execute thread-safe k-NN query (optional `efSearch` override) |
+| `POST` | `/api/v1/indexes/{name}/save` | `200 OK` | Persist index to `.nvec` format in server data directory |
+| `POST` | `/api/v1/indexes/load` | `201 Created` | Restore index from `.nvec` file into active registry |
+
+> [!IMPORTANT]
+> **Compilation & Runtime Compatibility Note on Java 25 & Spring Boot 3.4.0**:
+> `nanovector-core`, `nanovector-persistence`, `nanovector-benchmark`, and `nanovector-cli` are compiled targeting `--release 25`.
+> `nanovector-server` targets `--release 24` (`<maven.compiler.release>24</maven.compiler.release>`) to maintain binary compatibility with Spring Boot 3.4.0's embedded ASM `ClassReader` (which validates major version $\le 68$), while running on **Java 25 LTS Runtime** with incubator SIMD Vector API (`--add-modules jdk.incubator.vector`) and Foreign Function & Memory (FFM) API.
+> When Spring Framework upgrades its embedded ASM parser to support major version 69, `nanovector-server` can be bumped to `--release 25`.
+> Zero Spring or OpenAPI dependencies leak into the core, persistence, benchmark, or CLI modules.
+
+*Detailed deployment instructions, curl examples, and configuration options are available in [OPERATIONS_GUIDE.md](file:///d:/NanoVector/NanoVector/nanovector-server/OPERATIONS_GUIDE.md).*
+
+---
+
 ## 🗺️ Roadmap & Evolutionary Milestones
 
 - [x] **v0.1 (Phase 1)**: Multi-module setup, contiguous `VectorStorage`, distance metrics ($L_2^2$, Cosine, Dot Product), primitive `BoundedMaxHeap`, `FlatIndex` Ground Truth Oracle (26 unit tests).
@@ -898,7 +974,12 @@ java --add-modules jdk.incubator.vector -cp nanovector-benchmark/target/benchmar
   - [x] Three-way memory footprint characterization across scales $1\text{K} \to 100\text{K}$ measuring a **$5.10\times$ reduction in measured JVM heap delta** ($42.02\text{ MiB} \to 8.24\text{ MiB}$).
   - [x] Empirical search latency and throughput benchmark characterizing **$0.87\times - 1.00\times$ throughput ratio vs on-heap SQ8**, with $93.28\% - 99.92\%$ behavioral top-10 parity agreement.
   - [x] JMH GC allocation profiling showing no measurable allocation at JMH resolution ($0.000\text{ B/op}$ reported) on distance kernel and reducing heap data under GC management.
-- [ ] **v0.7 (Phase 7)**: Standalone CLI & Spring Boot REST API.
+- [x] **v0.7 (Phase 7)**: Standalone CLI, Spring Boot REST API & Systems Deployment (410 unit/integration tests total):
+  - [x] **Phase 7A (CLI)**: Standalone Picocli command-line interface (`nanovector-cli`) with `create`, `inspect`, `insert`, and `query` commands and real-process E2E testing.
+  - [x] **Phase 7B (Server Foundation)**: Central `IndexRegistry`, `ManagedIndex` fair read-write locking, `SearchContextProvider` object pool for thread-safe search contexts, and 20-thread concurrency verification on both on-heap and off-heap indexes with 100% ground-truth parity.
+  - [x] **Phase 7C (REST API)**: Full REST API under `/api/v1/indexes`, atomic batch pre-validation, k-NN queries with `efSearch` override, secure `.nvec` persistence without arbitrary filesystem access, and `@RestControllerAdvice` error response normalization.
+  - [x] **Phase 7D (OpenAPI & Operations)**: Springdoc OpenAPI 3.0 / Swagger UI (`/swagger-ui.html`), Actuator health check (`/actuator/health`), comprehensive operational documentation (`OPERATIONS_GUIDE.md`), and Java 25 / release 24 binary compatibility verification.
+
 
 
 
