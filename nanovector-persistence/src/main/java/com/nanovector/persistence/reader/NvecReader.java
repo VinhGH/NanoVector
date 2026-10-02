@@ -163,6 +163,91 @@ public final class NvecReader {
     return hnswIndex;
   }
 
+  /**
+   * Inspects and validates an NVEC v1 binary index file without loading the entire vector buffer or
+   * graph topology into memory.
+   *
+   * <p>Performs full defense-in-depth verification:
+   *
+   * <ol>
+   *   <li>Validates minimum file size (&ge; 40 bytes).
+   *   <li>Parses and validates the 32-byte header (magic bytes, version, endianness, metric,
+   *       dimensions, vector count).
+   *   <li>Validates pre-allocation structural sanity bounds against file size.
+   *   <li>Computes hardware-accelerated CRC32C checksum across all payload bytes {@code [0,
+   *       fileSize - 4)} and verifies equality against the stored footer checksum.
+   *   <li>Parses HNSW metadata block if present.
+   * </ol>
+   *
+   * @param path path to .nvec file
+   * @return validated {@link NvecInspectionResult} containing format parameters and verified CRC32C
+   * @throws CorruptIndexException if header invariants are violated or CRC32C does not match
+   * @throws com.nanovector.persistence.exception.UnsupportedVersionException if the version is not
+   *     supported
+   * @throws IOException on file I/O error
+   */
+  public static NvecInspectionResult inspect(Path path) throws IOException {
+    Objects.requireNonNull(path, "Path must not be null");
+
+    try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+      long fileSize = channel.size();
+
+      // 1. File size minimum check
+      if (fileSize < NvecConstants.MIN_FILE_SIZE_BYTES) {
+        throw new CorruptIndexException(
+            "File size "
+                + fileSize
+                + " bytes is smaller than minimum valid NVEC file size ("
+                + NvecConstants.MIN_FILE_SIZE_BYTES
+                + " bytes)");
+      }
+
+      // 2. Read and validate 32-byte Header
+      ByteBuffer headerBuffer = ByteBuffer.allocate(NvecConstants.HEADER_SIZE_BYTES);
+      readFully(channel, headerBuffer);
+      headerBuffer.flip();
+      NvecHeader header = NvecHeader.read(headerBuffer);
+
+      // 3. Pre-allocation structural sanity checks
+      validateStructuralBounds(header, fileSize);
+
+      // 4. CRC32C streaming integrity gate
+      long storedCrc = computeAndVerifyCrc32c(channel, fileSize);
+
+      // 5. Read metadata if present
+      channel.position(NvecConstants.HEADER_SIZE_BYTES);
+      ByteBuffer metaLenBuf =
+          ByteBuffer.allocate(NvecConstants.METADATA_LENGTH_FIELD_BYTES)
+              .order(ByteOrder.LITTLE_ENDIAN);
+      readFully(channel, metaLenBuf);
+      metaLenBuf.flip();
+      int metadataLength = metaLenBuf.getInt();
+      if (metadataLength < 0) {
+        throw new CorruptIndexException("Negative metadata_length: " + metadataLength);
+      }
+
+      HnswMetadata hnswMetadata = null;
+      if (header.indexType() == IndexType.HNSW) {
+        if (metadataLength < NvecConstants.HNSW_METADATA_PAYLOAD_BYTES) {
+          throw new CorruptIndexException(
+              "Insufficient metadata_length for HNSW: expected >= "
+                  + NvecConstants.HNSW_METADATA_PAYLOAD_BYTES
+                  + ", got "
+                  + metadataLength);
+        }
+        ByteBuffer metaBuf =
+            ByteBuffer.allocate(NvecConstants.HNSW_METADATA_PAYLOAD_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        readFully(channel, metaBuf);
+        metaBuf.flip();
+        hnswMetadata = HnswMetadata.read(metaBuf);
+      }
+
+      return new NvecInspectionResult(
+          fileSize, header, hnswMetadata, metadataLength, storedCrc, storedCrc, true);
+    }
+  }
+
   // ── Restoration Pipelines ───────────────────────────────────────────
 
   private static FlatIndex restoreFlat(
@@ -499,6 +584,11 @@ public final class NvecReader {
   }
 
   private static void verifyCrc32c(FileChannel channel, long fileSize) throws IOException {
+    computeAndVerifyCrc32c(channel, fileSize);
+  }
+
+  private static long computeAndVerifyCrc32c(FileChannel channel, long fileSize)
+      throws IOException {
     long payloadLength = fileSize - NvecConstants.FOOTER_CHECKSUM_SIZE_BYTES;
     CRC32C crc = new CRC32C();
     ByteBuffer chunk = ByteBuffer.allocate(BUFFER_SIZE);
@@ -534,6 +624,7 @@ public final class NvecReader {
               + ", computed "
               + Long.toHexString(computedCrc));
     }
+    return storedCrc;
   }
 
   private static void readFully(FileChannel channel, ByteBuffer buf) throws IOException {

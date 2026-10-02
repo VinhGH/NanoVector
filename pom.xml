@@ -28,6 +28,7 @@
         <maven.surefire.version>3.2.5</maven.surefire.version>
         <spotbugs.version>4.8.6.6</spotbugs.version>
         <jmh.version>1.37</jmh.version>
+        <picocli.version>4.7.6</picocli.version>
         <argLine></argLine>
     </properties>
 
@@ -35,6 +36,7 @@
         <module>nanovector-core</module>
         <module>nanovector-persistence</module>
         <module>nanovector-benchmark</module>
+        <module>nanovector-cli</module>
     </modules>
 
     <dependencyManagement>
@@ -51,6 +53,12 @@
                 <groupId>org.assertj</groupId>
                 <artifactId>assertj-core</artifactId>
                 <version>${assertj.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>info.picocli</groupId>
+                <artifactId>picocli</artifactId>
+                <version>${picocli.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

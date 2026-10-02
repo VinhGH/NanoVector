@@ -480,4 +480,76 @@ class NvecReaderTest {
     assertThat(restored.size()).isEqualTo(1);
     assertThat(restored.getVector(0)).containsExactly(1.0f, 2.0f);
   }
+
+  // ═════════════════════════════════════════════════════════════════════
+  // TIER 4 — INSPECTION
+  // ═════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("Should successfully inspect valid FLAT index without restoring vectors")
+  void testInspectFlatIndex() throws IOException {
+    int dim = 4;
+    FlatIndex original = new FlatIndex(dim, DistanceMetric.EUCLIDEAN);
+    original.insert(101L, new float[] {1.5f, 2.5f, 3.5f, 4.5f});
+    original.insert(102L, new float[] {5.5f, 6.5f, 7.5f, 8.5f});
+
+    Path file = tempDir.resolve("inspect_flat.nvec");
+    NvecWriter.write(original, file);
+
+    NvecInspectionResult result = NvecReader.inspect(file);
+
+    assertThat(result.fileSizeBytes()).isEqualTo(Files.size(file));
+    assertThat(result.header().dimension()).isEqualTo(dim);
+    assertThat(result.header().vectorCount()).isEqualTo(2);
+    assertThat(result.header().metric()).isEqualTo(DistanceMetric.EUCLIDEAN);
+    assertThat(result.isHnsw()).isFalse();
+    assertThat(result.hnswMetadata()).isNull();
+    assertThat(result.crcValid()).isTrue();
+    assertThat(result.storedCrc32c()).isEqualTo(result.computedCrc32c());
+  }
+
+  @Test
+  @DisplayName("Should successfully inspect valid HNSW index with metadata block")
+  void testInspectHnswIndex() throws IOException {
+    int dim = 4;
+    HnswConfig config = new HnswConfig(8, 16, 64, 50, 1.0 / Math.log(8), 42L);
+    HnswIndex original = new HnswIndex(dim, DistanceMetric.COSINE, config);
+    original.insert(1L, new float[] {0.1f, 0.2f, 0.3f, 0.4f});
+    original.insert(2L, new float[] {0.5f, 0.6f, 0.7f, 0.8f});
+
+    Path file = tempDir.resolve("inspect_hnsw.nvec");
+    NvecWriter.write(original, file);
+
+    NvecInspectionResult result = NvecReader.inspect(file);
+
+    assertThat(result.fileSizeBytes()).isEqualTo(Files.size(file));
+    assertThat(result.header().dimension()).isEqualTo(dim);
+    assertThat(result.header().vectorCount()).isEqualTo(2);
+    assertThat(result.header().metric()).isEqualTo(DistanceMetric.COSINE);
+    assertThat(result.isHnsw()).isTrue();
+    assertThat(result.hnswMetadata()).isNotNull();
+    assertThat(result.hnswMetadata().m()).isEqualTo(8);
+    assertThat(result.hnswMetadata().efConstruction()).isEqualTo(64);
+    assertThat(result.crcValid()).isTrue();
+    assertThat(result.storedCrc32c()).isEqualTo(result.computedCrc32c());
+  }
+
+  @Test
+  @DisplayName("Inspect should fail with CorruptIndexException when CRC32C checksum is corrupted")
+  void testInspectCorruptedChecksum() throws IOException {
+    FlatIndex original = new FlatIndex(2, DistanceMetric.EUCLIDEAN);
+    original.insert(1L, new float[] {1.0f, 2.0f});
+
+    Path file = tempDir.resolve("inspect_corrupt.nvec");
+    NvecWriter.write(original, file);
+
+    // Corrupt one payload byte
+    byte[] bytes = Files.readAllBytes(file);
+    bytes[35] ^= 0x55;
+    Files.write(file, bytes);
+
+    assertThatThrownBy(() -> NvecReader.inspect(file))
+        .isInstanceOf(CorruptIndexException.class)
+        .hasMessageContaining("CRC32C checksum mismatch");
+  }
 }
