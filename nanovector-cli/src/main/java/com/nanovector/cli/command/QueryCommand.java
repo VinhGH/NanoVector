@@ -125,6 +125,14 @@ public class QueryCommand implements Callable<Integer> {
       throw new IllegalArgumentException("Query vector must not be null");
     }
     String cleaned = raw.trim();
+    if ((cleaned.startsWith("\"") && !cleaned.endsWith("\""))
+        || (!cleaned.startsWith("\"") && cleaned.endsWith("\""))) {
+      throw new IllegalArgumentException("Unclosed quote in query vector: '" + cleaned + "'");
+    }
+    if ((cleaned.startsWith("[") && !cleaned.endsWith("]"))
+        || (!cleaned.startsWith("[") && cleaned.endsWith("]"))) {
+      throw new IllegalArgumentException("Unclosed bracket in query vector: '" + cleaned + "'");
+    }
     if (cleaned.startsWith("\"") && cleaned.endsWith("\"") && cleaned.length() >= 2) {
       cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
     }

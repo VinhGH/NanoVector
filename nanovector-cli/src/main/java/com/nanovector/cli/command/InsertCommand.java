@@ -210,6 +210,19 @@ public class InsertCommand implements Callable<Integer> {
           "Line " + lineNumber + ": ID " + id + " already exists in index", lineNumber);
     }
 
+    // Validate matching enclosing quotes and brackets
+    if ((vecPart.startsWith("\"") && !vecPart.endsWith("\""))
+        || (!vecPart.startsWith("\"") && vecPart.endsWith("\""))) {
+      throw new CsvValidationException(
+          "Line " + lineNumber + ": Unclosed quote in vector field: '" + vecPart + "'", lineNumber);
+    }
+    if ((vecPart.startsWith("[") && !vecPart.endsWith("]"))
+        || (!vecPart.startsWith("[") && vecPart.endsWith("]"))) {
+      throw new CsvValidationException(
+          "Line " + lineNumber + ": Unclosed bracket in vector field: '" + vecPart + "'",
+          lineNumber);
+    }
+
     // Strip optional enclosing quotes and brackets
     if (vecPart.startsWith("\"") && vecPart.endsWith("\"") && vecPart.length() >= 2) {
       vecPart = vecPart.substring(1, vecPart.length() - 1).trim();
